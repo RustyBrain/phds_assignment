@@ -1,0 +1,70 @@
+---
+title: "plotly_test"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv("plotly_username"="rusty_brain")
+Sys.setenv("plotly_api_key"="QGKQyqMMQpzTZagoA6OA")
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+library(tidyverse)
+library(plotly)
+
+df <- read.csv("https://raw.githubusercontent.com/bcdunbar/datasets/master/californiaPopulation.csv")
+
+cali <- map_data("county") %>%
+  filter(region == 'california')
+
+pop <- df %>%
+  group_by(County.Name) %>%
+  summarise(Pop = sum(Population))
+
+pop$County.Name <- tolower(pop$County.Name) # matching string
+
+cali_pop <- merge(cali, pop, by.x = "subregion", by.y = "County.Name")
+
+cali_pop$pop_cat <- cut(cali_pop$Pop, breaks = c(seq(0, 11000000, by = 500000)), labels=1:22)
+
+p <- cali_pop %>%
+  group_by(group) %>%
+  plot_ly(x = ~long, y = ~lat, color = ~pop_cat, colors = c('#ffeda0','#f03b20'),
+          text = ~subregion, hoverinfo = 'text') %>%
+  add_polygons(line = list(width = 0.4)) %>%
+  add_polygons(
+    fillcolor = 'transparent',
+    line = list(color = 'black', width = 0.5),
+    showlegend = FALSE, hoverinfo = 'none'
+  ) %>%
+  layout(
+    title = "California Population by County",
+    titlefont = list(size = 10),
+    xaxis = list(title = "", showgrid = FALSE,
+                 zeroline = FALSE, showticklabels = FALSE),
+    yaxis = list(title = "", showgrid = FALSE,
+                 zeroline = FALSE, showticklabels = FALSE)
+  )
+
+# Create a shareable link to your chart
+# Set up API credentials: https://plot.ly/r/getting-started
+chart_link = api_create(p, filename="county-level-fill-polygons")
+chart_link
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
