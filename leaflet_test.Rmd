@@ -1,0 +1,57 @@
+---
+title: "leaflet_test"
+author: "Russell Plunkett"
+date: "3 April 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(leaflet)
+library(dplyr)
+library(geojsonio)
+library(ggplot2)
+library(arulesViz)
+```
+
+```{r get_shape_data, include=FALSE, cache=TRUE}
+utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
+# drop Wales
+utlas <- utlas[grep('E', utlas$ctyua17cd), ]
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+
+map <- leaflet(utlas) %>%
+  # Base groups
+  addTiles(group = "OSM (default)") %>%
+  addProviderTiles(providers$Stamen.Toner, group = "Toner") %>%
+  addProviderTiles(providers$Stamen.TonerLite, group = "Toner Lite") %>%
+  # Overlay groups
+  # addCircles(~long, ~lat, ~10^mag/5, stroke = F, group = "Quakes") %>%
+  addPolygons(
+    fill = T, weight = 2, color = "#FFFFFF", group = "Outline") %>%
+  # Layers control
+  addLayersControl(
+    baseGroups = c("OSM (default)", "Toner", "Toner Lite"),
+    overlayGroups = c("Outline"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+map
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

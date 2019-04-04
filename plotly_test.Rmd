@@ -18,6 +18,7 @@ When you click the **Knit** button a document will be generated that includes bo
 ```{r cars}
 library(tidyverse)
 library(plotly)
+library(dplyr)
 
 df <- read.csv("https://raw.githubusercontent.com/bcdunbar/datasets/master/californiaPopulation.csv")
 
@@ -33,6 +34,31 @@ pop$County.Name <- tolower(pop$County.Name) # matching string
 cali_pop <- merge(cali, pop, by.x = "subregion", by.y = "County.Name")
 
 cali_pop$pop_cat <- cut(cali_pop$Pop, breaks = c(seq(0, 11000000, by = 500000)), labels=1:22)
+cali_pop$rand_int <- sample.int(21, replace = TRUE, nrow(cali_pop))
+
+pop_annotations <- list(
+  x = 
+)
+
+updatemenus <- list(
+  list(
+    active = -1,
+    type = 'buttons',
+    buttons = list(
+        label = 'pop',
+        method = 'update',
+        args = list(
+          list(
+            visible = c(FALSE, TRUE)
+          ),
+          list(
+            title = "Population",
+            annotations = list(c(), pop_annotations)
+          )
+        )
+      )
+    )
+)
 
 p <- cali_pop %>%
   group_by(group) %>%
@@ -50,7 +76,8 @@ p <- cali_pop %>%
     xaxis = list(title = "", showgrid = FALSE,
                  zeroline = FALSE, showticklabels = FALSE),
     yaxis = list(title = "", showgrid = FALSE,
-                 zeroline = FALSE, showticklabels = FALSE)
+                 zeroline = FALSE, showticklabels = FALSE),
+    updatemenus = updatemenus
   )
 
 # Create a shareable link to your chart

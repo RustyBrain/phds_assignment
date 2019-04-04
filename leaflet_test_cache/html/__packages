@@ -1,0 +1,8 @@
+base
+leaflet
+dplyr
+geojsonio
+ggplot2
+Matrix
+arules
+arulesViz
