@@ -18,6 +18,7 @@ library(arulesViz)
 utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
 # drop Wales
 utlas <- utlas[grep('E', utlas$ctyua17cd), ]
+utlas@data <- merge(utlas@data, z_mean, by.x = "ctyua17cd", by.y = "AreaCode")
 ```
 
 ## R Markdown
@@ -36,7 +37,7 @@ map <- leaflet(utlas) %>%
   # Overlay groups
   # addCircles(~long, ~lat, ~10^mag/5, stroke = F, group = "Quakes") %>%
   addPolygons(
-    fill = T, weight = 2, color = "#FFFFFF", group = "Outline") %>%
+    weight = 2, fillOpacity = ifelse(utlas@data$mean > 0, yes = 0.5, no = 0), group = "Outline") %>%
   # Layers control
   addLayersControl(
     baseGroups = c("OSM (default)", "Toner", "Toner Lite"),
