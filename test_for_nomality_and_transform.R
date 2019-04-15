@@ -11,6 +11,7 @@ library(psycho)
 
 # Get data
 df <- fingertips_data(ProfileID = 19, rank = TRUE)
+df <- social_determinants_df
 
 # Create a data frame of indicator polarities
 polarities <- df %>%
@@ -20,7 +21,10 @@ polarities <- df %>%
   
 
 # Select as most recent
-most_recent_data <- df[grep('2017', df$TimeperiodSortable), ]
+most_recent_data <- df %>%
+  group_by(IndicatorID) %>%
+  filter(TimeperiodSortable == max(TimeperiodSortable)) %>%
+  ungroup()
 
 # Select County & UA
 most_recent_data <- most_recent_data[grep('County', most_recent_data$AreaType), ]
@@ -55,7 +59,7 @@ to_impute <- to_impute %>% select(-AreaCode)
 imputed <- mi(as.data.frame(to_impute), seed = 225)
 summary(imputed)
 image(imputed) # Show heatmap of imputed values in heatmap
-imputed_df <- complete(imputed, m = 1) # Retrieve the dataframe
+imputed_df <- mi::complete(imputed, m = 1) # Retrieve the dataframe
 imputed_df <- select(imputed_df, -contains("missing")) # Remove the boolean 'missing' columns. 
 
 
@@ -100,17 +104,17 @@ test_normaility_and_transform <- function(column_data){
 
 normality <- imputed_df %>% summarise_all(.funs = funs(statistic = shapiro.test(.)$statistic, p.value = shapiro.test(.)$p.value))
 # Normalise data.
-normalised <- data.frame(imputed_df, lapply(imputed_df, test_normaility_and_transform))
-
-#Some transformed data contains NA values, and therefore these values were imputed using the same method as above. 
-norm_reduced <- select(normalised, contains(".1"))
-norm_reduced <- norm_reduced[!sapply(norm_reduced, function(x) all(is.na(x)))]
-norm_reduced <- mi(norm_reduced, seed = 225)
-summary(norm_reduced)
-image(norm_reduced)
-norm_reduced <- complete(norm_reduced, m = 1)
-norm_reduced <- select(norm_reduced, -contains("missing"))
-
+# normalised <- data.frame(imputed_df, lapply(imputed_df, test_normaility_and_transform))
+# 
+# #Some transformed data contains NA values, and therefore these values were imputed using the same method as above. 
+# norm_reduced <- select(normalised, contains(".1"))
+# norm_reduced <- norm_reduced[!sapply(norm_reduced, function(x) all(is.na(x)))]
+# norm_reduced <- mi(norm_reduced, seed = 225)
+# summary(norm_reduced)
+# image(norm_reduced)
+# norm_reduced <- mi::complete(norm_reduced, m = 1)
+# norm_reduced <- select(norm_reduced, -contains("missing"))
+norm_reduced <- imputed_df
 
 # Test colinearity - needs a lot of work!
 corr <- cor(norm_reduced)
