@@ -16,12 +16,25 @@ library(fingertipsR)
 library(geojsonio)
 library(ggcorrplot)
 library(ggplot2)
+library(htmltools)
 library(leaflet)
 library(mi)
 library(psycho)
 library(readr)
+library(rmapshaper)
 library(tibble)
 library(tidyr)
+
+# listOfPackages <- c("arulesViz","betareg","car","caret","dplyr",
+#                     "fingertipsR","geojsonio","ggcorrplot","ggplot2", "htmltools",
+#                     "leaflet","mi", "psycho" ,"readr", "tibble" ,"tidyr")
+# for (i in listOfPackages){
+#      if(! i %in% installed.packages()){
+#          install.packages(i, dependencies = TRUE)
+#     }
+#     print(i)  
+#     library(i)
+# }
 ```
 
 ## Get and Manipulate the data to retreive mean Z score:
@@ -252,38 +265,78 @@ analyze_df <- function(df, dataset){
   return(z_data)
 }
 
-
+health_outcomes_processed <- analyze_df(health_outcomes_df, 'h')
 risk_factors_processed <- analyze_df(risk_factors_df, 'r')
+
+# Add imd to social determinants and recalc mean
 soc_det_processed <- analyze_df(social_determinants_df, 's')
 soc_det_processed <- merge(soc_det_processed, z_data_imd, by.x = 'AreaCode', by.y = 'UTLA18CD')
 soc_det_processed$mean <- apply(soc_det_processed[, !(names(soc_det_processed) %in% c('mean', 'AreaCode'))], 1, mean)
-health_outcomes_processed <- analyze_df(health_outcomes_df, 'h')
 
+z_means <- data.frame(health_outcomes_processed$mean, soc_det_processed$mean, risk_factors_processed$mean, risk_factors_processed$AreaCode)
+names(z_means) <- c("health_outcomes", "social_determinants", "risk_factors", "AreaCode")
+z_means$grand_mean <- apply(z_means[, !(names(z_means) %in% c('AreaCode'))], 1, mean)
+z_means$health_outcomes.rank <- rank(z_means$health_outcomes, na.last = FALSE)
+z_means$social_determinants.rank <- rank(z_means$social_determinants, na.last = FALSE)
+z_means$risk_factors.rank <- rank(z_means$risk_factors, na.last = FALSE)
+z_means$overall.rank <- rank(z_means$grand_mean, na.last = FALSE)
 ```
 
 ## Plot of interactive map
 
 
-```{r get_shape_data, cache=TRUE}
+```{r get_shape_data, out.width = '100%'}
 utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
 # drop Wales
 utlas <- utlas[grep('E', utlas$ctyua17cd), ]
-utlas@data <- merge(utlas@data, z_mean, by.x = "ctyua17cd", by.y = "AreaCode")
+utlas <- ms_simplify(utlas)
+utlas@data <- left_join(utlas@data, z_means, by = c("ctyua17cd" = "AreaCode"))
+pal_grand <- colorNumeric(palette = "Blues", domain = utlas$grand_mean)
+pal_soc <- colorNumeric(palette = "Blues", domain = utlas$social_determinants)
+pal_risk <- colorNumeric(palette = "Blues", domain = utlas$risk_factors)
+pal_outcomes <- colorNumeric(palette = "Blues", domain = utlas$health_outcomes)
+labs_grand_mean <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Health Index Score:', round(utlas@data[i, 'grand_mean'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'overall.rank'], '</p>' ) 
+})
+labs_soc <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Social Determinants Score:', round(utlas@data[i, 'social_determinants'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'social_determinants.rank'], '</p>' ) 
+})
+labs_risk <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Risk Factors Score:', round(utlas@data[i, 'risk_factors'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'risk_factors.rank'], '</p>' ) 
+})
+labs_outcomes <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Health Outcomes Score:', round(utlas@data[i, 'health_outcomes'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'health_outcomes.rank'], '</p>' ) 
+})
 map1 <- leaflet(utlas) %>%
   # Base groups
   addTiles(group = "OSM (default)") %>%
-  addProviderTiles(providers$Stamen.Toner, group = "Toner") %>%
-  addProviderTiles(providers$Stamen.TonerLite, group = "Toner Lite") %>%
   # Overlay groups
   # addCircles(~long, ~lat, ~10^mag/5, stroke = F, group = "Quakes") %>%
   addPolygons(
-    weight = 2, fillOpacity = ifelse(utlas@data$mean > -0.2, yes = 0.5, no = 0), group = "Outline") %>%
+    weight = 2, fillOpacity = 0.8, color = ~pal_grand(grand_mean), group = "Health Index - Total", label = lapply(labs_grand_mean, HTML)) %>%
+  
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_soc(social_determinants), group = "Social Determinants", label = lapply(labs_soc, HTML)) %>%
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_risk(risk_factors), group = "Risk Factors", label = lapply(labs_risk, HTML)) %>%
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_outcomes(health_outcomes), group = "Health Outcomes", label = lapply(labs_outcomes, HTML)) %>%
+
+
   # Layers control
   addLayersControl(
-    baseGroups = c("OSM (default)", "Toner", "Toner Lite"),
-    overlayGroups = c("Outline"),
-    options = layersControlOptions(collapsed = FALSE)
-  )
+    baseGroups = c("Health Index - Total", "Social Determinants", "Risk Factors", "Health Outcomes"),
+    overlayGroups = c("OSM (default)"),
+    options = layersControlOptions(collapsed = FALSE)) %>%
+  addLegend("bottomright", pal = pal_grand, values = utlas$grand_mean, title = "Mean Z Scores for Index", opacity = 1)
 map1
 ```
 
