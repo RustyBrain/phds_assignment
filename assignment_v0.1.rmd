@@ -7,23 +7,27 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-library(arulesViz)
-library(betareg)
-library(car)
-library(caret)
-library(dplyr)
-library(fingertipsR)
-library(geojsonio)
-library(ggcorrplot)
-library(ggplot2)
-library(htmltools)
-library(leaflet)
-library(mi)
-library(psycho)
-library(readr)
-library(rmapshaper)
-library(tibble)
-library(tidyr)
+if (!require("pacman")) install.packages("pacman", repos = "http://cran.us.r-project.org")
+pacman::p_load(arulesViz, betareg, car, caret, dplyr,
+               fingertipsR, geojsonio, ggcorrplot, ggplot2, htmltools,
+               leaflet, mi, psycho, readr, rmapshaper, tibble ,tidyr)
+# library(arulesViz)
+# library(betareg)
+# library(car)
+# library(caret)
+# library(dplyr)
+# library(fingertipsR)
+# library(geojsonio)
+# library(ggcorrplot)
+# library(ggplot2)
+# library(htmltools)
+# library(leaflet)
+# library(mi)
+# library(psycho)
+# library(readr)
+# library(rmapshaper)
+# library(tibble)
+# library(tidyr)
 
 # listOfPackages <- c("arulesViz","betareg","car","caret","dplyr",
 #                     "fingertipsR","geojsonio","ggcorrplot","ggplot2", "htmltools",
@@ -291,10 +295,10 @@ utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db7
 utlas <- utlas[grep('E', utlas$ctyua17cd), ]
 utlas <- ms_simplify(utlas)
 utlas@data <- left_join(utlas@data, z_means, by = c("ctyua17cd" = "AreaCode"))
-pal_grand <- colorNumeric(palette = "Blues", domain = utlas$grand_mean)
-pal_soc <- colorNumeric(palette = "Blues", domain = utlas$social_determinants)
-pal_risk <- colorNumeric(palette = "Blues", domain = utlas$risk_factors)
-pal_outcomes <- colorNumeric(palette = "Blues", domain = utlas$health_outcomes)
+pal_grand <- colorNumeric(palette = "Spectral", domain = utlas$grand_mean)
+pal_soc <- colorNumeric(palette = "Spectral", domain = utlas$social_determinants)
+pal_risk <- colorNumeric(palette = "Spectral", domain = utlas$risk_factors)
+pal_outcomes <- colorNumeric(palette = "Spectral", domain = utlas$health_outcomes)
 labs_grand_mean <- lapply(seq(nrow(utlas@data)), function(i) {
   paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
           'Health Index Score:', round(utlas@data[i, 'grand_mean'], 3),'</p><p>', 
