@@ -7,27 +7,27 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-if (!require("pacman")) install.packages("pacman", repos = "http://cran.us.r-project.org")
-pacman::p_load(arulesViz, betareg, car, caret, dplyr,
-               fingertipsR, geojsonio, ggcorrplot, ggplot2, htmltools,
-               leaflet, mi, psycho, readr, rmapshaper, tibble ,tidyr)
-# library(arulesViz)
-# library(betareg)
-# library(car)
-# library(caret)
-# library(dplyr)
-# library(fingertipsR)
-# library(geojsonio)
-# library(ggcorrplot)
-# library(ggplot2)
-# library(htmltools)
-# library(leaflet)
-# library(mi)
-# library(psycho)
-# library(readr)
-# library(rmapshaper)
-# library(tibble)
-# library(tidyr)
+# if (!require("pacman")) install.packages("pacman", repos = "http://cran.us.r-project.org")
+# pacman::p_load(arulesViz, betareg, car, caret, dplyr,
+#                fingertipsR, geojsonio, ggcorrplot, ggplot2, htmltools,
+#                leaflet, mi, psycho, readr, rmapshaper, tibble ,tidyr)
+library(arulesViz)
+library(betareg)
+library(car)
+library(caret)
+library(dplyr)
+library(fingertipsR)
+library(geojsonio)
+library(ggcorrplot)
+library(ggplot2)
+library(htmltools)
+library(leaflet)
+library(mi)
+library(psycho)
+library(readr)
+library(rmapshaper)
+library(tibble)
+library(tidyr)
 
 # listOfPackages <- c("arulesViz","betareg","car","caret","dplyr",
 #                     "fingertipsR","geojsonio","ggcorrplot","ggplot2", "htmltools",
@@ -82,7 +82,7 @@ z_data_imd <- pop_weighted_ave_domains %>%
 early_years_indicators <- indicators(DomainID = 1938133223)
 social_determinants_df <- fingertips_data(IndicatorID = c(as.vector(early_years_indicators$IndicatorID), 93376, 22304, 10501, 90282, 91126, 91133, 92899, 90638, 93103, 93131, 93175, 91463, 90244, 90245, 92447, 91116, 92785, 91524, 91307), rank = T)
 
-prevalance_estimates = indicators(ProfileID = 37)
+prevalance_estimates = indicators(DomainID = 1938133099)
 mortality_indicators = indicators(DomainID=c(1000044, 1000049))
 extra_indicators = as.vector(rbind(as.vector(prevalance_estimates$IndicatorID), as.vector(mortality_indicators$IndicatorID)))
 health_outcomes_df = fingertips_data(IndicatorID = c(extra_indicators, 20101, 92718, 92724, 92725, 90287, 90641), rank = T)
@@ -91,6 +91,9 @@ behav_risk_factors = indicators(DomainID=c(1938132694, 1938133001))
 inds <- c(as.vector(behav_risk_factors$IndicatorID), 30101, 113, 1203, 93085, 90323, 93077, 92527, 92937, 92588, 92443)
 risk_factors_df = fingertips_data(IndicatorID = inds, rank = T)
 
+soc_dec_meta <- indicator_metadata(IndicatorID = c(IndicatorID = c(as.vector(early_years_indicators$IndicatorID), 93376, 22304, 10501, 90282, 91126, 91133, 92899, 90638, 93103, 93131, 93175, 91463, 90244, 90245, 92447, 91116, 92785, 91524, 91307)))
+risk_fac_meta <- indicator_metadata(IndicatorID = inds)
+health_out_meta <- indicator_metadata(IndicatorID = c(extra_indicators, 20101, 92718, 92724, 92725, 90287, 90641))
 ```
 
 ```{r manipulate_data}
@@ -107,6 +110,7 @@ analyze_df <- function(df, dataset){
   most_recent_data <- df %>%
     group_by(IndicatorID) %>%
     filter(TimeperiodSortable == max(TimeperiodSortable)) %>%
+    filter(Sex == "Persons") %>%
     ungroup()
   
   # Select County & UA
@@ -211,7 +215,7 @@ analyze_df <- function(df, dataset){
              ggtheme = ggplot2::theme_gray,
              colors = c("#6D9EC1", "white", "#E46726"),
              insig = "blank")
-  hc <- findCorrelation(corr)
+  hc <- caret::findCorrelation(corr)
   hc <- sort(hc)
   if (length(hc) == 0){
     reduced_data <- norm_reduced
@@ -290,7 +294,8 @@ z_means$overall.rank <- rank(z_means$grand_mean, na.last = FALSE)
 
 
 ```{r get_shape_data, out.width = '100%'}
-utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
+# utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
+utlas <- geojson_read("Counties_and_Unitary_Authorities_December_2017_Full_Clipped_Boundaries_in_England_and_Wales.geojson", what = 'sp')
 # drop Wales
 utlas <- utlas[grep('E', utlas$ctyua17cd), ]
 utlas <- ms_simplify(utlas)
