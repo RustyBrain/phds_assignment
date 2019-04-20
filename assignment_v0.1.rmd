@@ -98,7 +98,7 @@ health_out_meta <- indicator_metadata(IndicatorID = c(extra_indicators, 20101, 9
 
 ```{r manipulate_data}
 
-analyze_df <- function(df, dataset){
+analyze_df <- function(df){
   # Create a data frame of indicator polarities
   polarities <- df %>%
     select(IndicatorID, Polarity) %>%
@@ -106,7 +106,7 @@ analyze_df <- function(df, dataset){
     spread(key = IndicatorID, value = Polarity)
     
   
-  # Select as most recent for each indicator
+  # Select as most recent for each indicator and restrict to persons rather than include sex breakdowns
   most_recent_data <- df %>%
     group_by(IndicatorID) %>%
     filter(TimeperiodSortable == max(TimeperiodSortable)) %>%
@@ -117,7 +117,7 @@ analyze_df <- function(df, dataset){
   most_recent_data <- most_recent_data[grep('County', most_recent_data$AreaType), ]
   
   
-  # Transpose to wide data
+  # Transpose to wide data and remove any indicators with no data
   wide_df <- most_recent_data %>%
     select(AreaCode, IndicatorID, Value) %>%
     tibble::rowid_to_column() %>%
@@ -207,7 +207,6 @@ analyze_df <- function(df, dataset){
   # 
   # print(norm_reduced)
   norm_reduced <- imputed_df
-  print(norm_reduced)
   # Test colinearity - needs a lot of work!
   corr <- cor(norm_reduced)
   ggcorrplot(corr, hc.order = TRUE, type = "lower",
@@ -230,7 +229,6 @@ analyze_df <- function(df, dataset){
   }
 
 
-
   # Polarity check and inversion. If 'Low is good', then the scores are inverted to ensure the same direction of performance in the data. 
   polarity_check <- function(col_name){
     if (grepl(polarities[[col_name]], "RAG - Low is good")) {
@@ -240,8 +238,22 @@ analyze_df <- function(df, dataset){
     }
   }
 
+  create_summary_stats <- function(x){
+    summary_stats <- sapply(x, function(x) c( "Stand dev" = sd(x), 
+                         "Mean"= mean(x,na.rm=TRUE),
+                         "n" = length(x),
+                         "Median" = median(x),
+                         "CoeffofVariation" = sd(x)/mean(x,na.rm=TRUE),
+                         "Minimum" = min(x),
+                         "Maximun" = max(x),
+                         "Upper Quantile" = quantile(x,1),
+                         "LowerQuartile" = quantile(x,0)
+                    )
+      )
+    return(summary_stats)
+  }
 
-
+ 
   # Create Z scores using psycho package's standardize() function. 
   # Makowski, (2018). The psycho Package: an Efficient and Publishing-Oriented Workflow for Psychological Science. Journal of Open Source Software, 3(22), 470. https://doi.org/10.21105/joss.00470
   z_data <- reduced_data %>% standardize()
@@ -258,26 +270,32 @@ analyze_df <- function(df, dataset){
   colnames(z_data) <- colnames(polarities)
   
   # Get metadata for indicators and set them to global variables to use outside the function
-  if (dataset == 'r'){
-    risk_factors_metadata <<- indicator_metadata(IndicatorID = colnames(z_data))
-  } else if (dataset == 's') {
-    soc_det_metadata <<- indicator_metadata(IndicatorID = colnames(z_data))
-  } else if (dataset == 'h') {
-    health_outcomes_metadata <<- indicator_metadata(IndicatorID = colnames(z_data))
-  }
+  # Get Summary statistics for benchmarking 
+  metadata_to_return <- indicator_metadata(IndicatorID = colnames(z_data))
+  summary_to_return <- create_summary_stats(reduced_data)
   z_data$mean <- apply(z_data, 1, mean)
   z_data$AreaCode <- wide_df$AreaCode
   
   
   # z_mean <- z_data %>% select(mean, AreaCode)
-  return(z_data)
+  return(list('data' = z_data, 'metadata' = metadata_to_return, 'summary' = summary_to_return))
 }
 
-health_outcomes_processed <- analyze_df(health_outcomes_df, 'h')
-risk_factors_processed <- analyze_df(risk_factors_df, 'r')
+health_outcomes_returned <- analyze_df(health_outcomes_df)
+health_outcomes_processed <- health_outcomes_returned$data
+health_outcomes_metadata <- health_outcomes_returned$metadata
+health_outcomes_summary <- health_outcomes_returned$summary
+risk_factors_returned <- analyze_df(risk_factors_df)
+risk_factors_processed <- risk_factors_returned$data
+risk_factors_metadata <- risk_factors_returned$metadata
+risk_factors_summary <- risk_factors_returned$summary
 
 # Add imd to social determinants and recalc mean
-soc_det_processed <- analyze_df(social_determinants_df, 's')
+soc_det_returned <- analyze_df(social_determinants_df)
+soc_det_processed <- soc_det_returned$data
+soc_det_metadata <- soc_det_returned$metadata
+soc_det_summary <- soc_det_returned$summary
+
 soc_det_processed <- merge(soc_det_processed, z_data_imd, by.x = 'AreaCode', by.y = 'UTLA18CD')
 soc_det_processed$mean <- apply(soc_det_processed[, !(names(soc_det_processed) %in% c('mean', 'AreaCode'))], 1, mean)
 
@@ -348,5 +366,23 @@ map1 <- leaflet(utlas) %>%
   addLegend("bottomright", pal = pal_grand, values = utlas$grand_mean, title = "Mean Z Scores for Index", opacity = 1)
 map1
 ```
+```{r compare_with_gbd}
+temp <- tempfile()
+download.file("http://s3.healthdata.org/gbd-api-2017-public/e9890501faf9f59e13ea28802f789ac0_files/IHME-GBD_2017_DATA-e9890501-1.zip", temp)
+gbd_data <- read_csv(unz(temp, "IHME-GBD_2017_DATA-e9890501-1.csv"))
+unlink(temp)
+gbd_data$gbd_rank <- rank(gbd_data$val)
+gbd_data$location[gbd_data$location == "St Helens"] <- "St. Helens"
+comparision <- left_join(utlas@data, gbd_data, by = c("ctyua17nm" = "location"))
+cor.test(~ overall.rank + gbd_rank, data = comparision, method = "spearman", continuity = F, conf.level = 0.95)
+
+```
+```{r output_descriptives}
 
 
+summary_stats <- cbind(as.data.frame(soc_det_summary), as.data.frame(risk_factors_summary), as.data.frame(health_outcomes_summary))
+names(summary_stats) <- substring(names(summary_stats), 2)
+
+summary_stats <- as.data.frame(t(summary_stats))
+write.csv(summary_stats, "baseline_measures.csv")
+```
