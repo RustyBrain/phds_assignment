@@ -384,5 +384,5 @@ summary_stats <- cbind(as.data.frame(soc_det_summary), as.data.frame(risk_factor
 names(summary_stats) <- substring(names(summary_stats), 2)
 
 summary_stats <- as.data.frame(t(summary_stats))
-write.csv(summary_stats, "baseline_measures.csv")
+
 ```

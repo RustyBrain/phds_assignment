@@ -1,0 +1,2804 @@
+---
+title: "The Health of a Nation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(arulesViz)
+library(betareg)
+library(car)
+library(caret)
+library(dplyr)
+library(fingertipsR)
+library(geojsonio)
+library(ggcorrplot)
+library(ggplot2)
+library(htmltools)
+library(kableExtra)
+library(leaflet)
+library(mi)
+library(psycho)
+library(readr)
+library(rmapshaper)
+library(tibble)
+library(tidyr)
+
+
+# Get the indicies of multiple deprivation at LSOA level.
+imd_df <- read_csv('https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/467774/File_7_ID_2015_All_ranks__deciles_and_scores_for_the_Indices_of_Deprivation__and_population_denominators.csv')
+
+# Add UTLA mapping 
+lsoa_utla_lookup <- read_csv('https://opendata.arcgis.com/datasets/95ecb220a30e41d5ae759cd1c9aa929f_0.csv')
+lsoa_utla_lookup <- lsoa_utla_lookup %>%
+  select(LSOA11CD, UTLA18CD)
+imd_df <- merge(x = imd_df, y = lsoa_utla_lookup, by.x = 'LSOA code (2011)', by.y = 'LSOA11CD')
+
+# Select only the subdomain totals
+pop_weighted_ave_domains <- imd_df %>%
+  select("Income Score (rate)", "Employment Score (rate)", "Education, Skills and Training Score", "Health Deprivation and Disability Score",
+                 "Crime Score", "Barriers to Housing and Services Score", "Living Environment Score", 
+                 "Income Deprivation Affecting Children Index (IDACI) Score (rate)", 
+                 "Income Deprivation Affecting Older People (IDAOPI) Score (rate)", "Children and Young People Sub-domain Score",
+                 "Adult Skills Sub-domain Score", "Geographical Barriers Sub-domain Score", "Wider Barriers Sub-domain Score", 
+                 "Indoors Sub-domain Score", "Outdoors Sub-domain Score", "Total population: mid 2012 (excluding prisoners)")
+
+# Create population weighted averages for each UTLA
+pop_weighted_ave_domains <- pop_weighted_ave_domains[, 1:15] / pop_weighted_ave_domains[,16]
+pop_weighted_ave_domains$UTLA18CD <- imd_df$UTLA18CD
+pop_weighted_ave_domains <- pop_weighted_ave_domains %>%
+  group_by(UTLA18CD) %>%
+  summarise_each(funs(mean))
+
+# Create z scores of deprivation matrix and reverse polarity as low is good on the deprivation scores
+z_data_imd <- pop_weighted_ave_domains %>%
+  standardize() %>%
+  mutate_each(funs(-.), -one_of("UTLA18CD"))
+
+# Get data
+# Seleceted indicators from a variety of fingertips profiles selected to fulfill the Marmot definitions of Social Determinants, Health Outcomes, and Risk Factors
+
+early_years_indicators <- indicators(DomainID = 1938133223)
+social_determinants_df <- fingertips_data(IndicatorID = c(as.vector(early_years_indicators$IndicatorID), 93376, 22304, 10501, 90282, 91126, 91133, 92899, 90638, 93103, 93131, 93175, 91463, 90244, 90245, 92447, 91116, 92785, 91524, 91307), rank = T)
+
+prevalance_estimates = indicators(DomainID = 1938133099)
+mortality_indicators = indicators(DomainID=c(1000044, 1000049))
+extra_indicators = as.vector(rbind(as.vector(prevalance_estimates$IndicatorID), as.vector(mortality_indicators$IndicatorID)))
+health_outcomes_df = fingertips_data(IndicatorID = c(extra_indicators, 20101, 92718, 92724, 92725, 90287, 90641), rank = T)
+
+behav_risk_factors = indicators(DomainID=c(1938132694, 1938133001))
+inds <- c(as.vector(behav_risk_factors$IndicatorID), 30101, 113, 1203, 93085, 90323, 93077, 92527, 92937, 92588, 92443)
+risk_factors_df = fingertips_data(IndicatorID = inds, rank = T)
+
+soc_dec_meta <- indicator_metadata(IndicatorID = c(IndicatorID = c(as.vector(early_years_indicators$IndicatorID), 93376, 22304, 10501, 90282, 91126, 91133, 92899, 90638, 93103, 93131, 93175, 91463, 90244, 90245, 92447, 91116, 92785, 91524, 91307)))
+risk_fac_meta <- indicator_metadata(IndicatorID = inds)
+health_out_meta <- indicator_metadata(IndicatorID = c(extra_indicators, 20101, 92718, 92724, 92725, 90287, 90641))
+
+analyze_df <- function(df){
+  # Create a data frame of indicator polarities
+  polarities <- df %>%
+    select(IndicatorID, Polarity) %>%
+    distinct() %>%
+    spread(key = IndicatorID, value = Polarity)
+    
+  
+  # Select as most recent for each indicator and restrict to persons rather than include sex breakdowns
+  most_recent_data <- df %>%
+    group_by(IndicatorID) %>%
+    filter(TimeperiodSortable == max(TimeperiodSortable)) %>%
+    filter(Sex == "Persons") %>%
+    ungroup()
+  
+  # Select County & UA
+  most_recent_data <- most_recent_data[grep('County', most_recent_data$AreaType), ]
+  
+  
+  # Transpose to wide data and remove any indicators with no data
+  wide_df <- most_recent_data %>%
+    select(AreaCode, IndicatorID, Value) %>%
+    tibble::rowid_to_column() %>%
+    group_by(IndicatorID, AreaCode) %>%
+    spread(key = IndicatorID, value = Value) %>%
+    summarise_all(funs(na.omit(.)[1]))
+  rownames(wide_df) <- wide_df$AreaCode
+  wide_df <- wide_df %>%
+    select(-rowid) # Remove row id column
+  
+  # Remove areas with over 50% missing data - areas with this are unlikely to add any information as their values are more imputed than not
+  wide_df$proportna <- apply(wide_df, 1, function(x) sum(is.na(x)) / dim(wide_df)[2])
+  wide_df <- wide_df[wide_df$proportna < 0.5,] 
+  wide_df <- wide_df %>% select(-proportna)
+  
+  
+  # Remove indicators with over 80% missing data - rather arbatrary number at the moment
+  wide_df <- wide_df[colSums(is.na(wide_df)) / dim(wide_df)[1] < 0.2]
+  
+  
+  # impute missing data - using a Bayesian framework, with 30 inerations and 4 chains. A random seed was chosen to ensure reproducability. The bootstrap was envoked as a method of selecting random imputations. 
+  # http://www.stat.columbia.edu/~gelman/research/published/mipaper.pdf
+  to_impute <- wide_df
+  rownames(to_impute) <- to_impute$AreaCode
+  to_impute <- to_impute %>% select(-AreaCode) 
+  imputed <- mi(as.data.frame(to_impute), seed = 225)
+  summary(imputed)
+  imp_img <- image(imputed) # Show heatmap of imputed values in heatmap
+  imputed_df <- mi::complete(imputed, m = 1) # Retrieve the dataframe
+  imputed_df <- select(imputed_df, -contains("missing")) # Remove the boolean 'missing' columns. 
+  
+  norm_reduced <- imputed_df
+  # Test colinearity - needs a lot of work!
+  corr <- cor(norm_reduced)
+  ggcorrplot(corr, hc.order = TRUE, type = "lower",
+             outline.col = "white",
+             ggtheme = ggplot2::theme_gray,
+             colors = c("#6D9EC1", "white", "#E46726"),
+             insig = "blank")
+  hc <- caret::findCorrelation(corr)
+  hc <- sort(hc)
+  if (length(hc) == 0){
+    reduced_data <- norm_reduced
+  } else {
+    reduced_data <- norm_reduced[, -c(hc)]
+    corr_reduced <- cor(reduced_data)
+    ggcorrplot(corr_reduced, hc.order = TRUE, type = "lower",
+               outline.col = "white",
+               ggtheme = ggplot2::theme_gray,
+               colors = c("#6D9EC1", "white", "#E46726"),
+               insig = "blank")
+  }
+
+
+  # Polarity check and inversion. If 'Low is good', then the scores are inverted to ensure the same direction of performance in the data. 
+  polarity_check <- function(col_name){
+    if (grepl(polarities[[col_name]], "RAG - Low is good")) {
+      z_data[[col_name]] <- -z_data[[col_name]]
+    } else {
+      z_data[[col_name]] <- z_data[[col_name]]
+    }
+  }
+
+  create_summary_stats <- function(x){
+    summary_stats <- sapply(x, function(x) c( "Stand dev" = sd(x), 
+                         "Mean"= mean(x,na.rm=TRUE),
+                         "n" = length(x),
+                         "Median" = median(x),
+                         "CoeffofVariation" = sd(x)/mean(x,na.rm=TRUE),
+                         "Minimum" = min(x),
+                         "Maximun" = max(x),
+                         "Upper Quantile" = quantile(x,1),
+                         "LowerQuartile" = quantile(x,0)
+                    )
+      )
+    return(summary_stats)
+  }
+
+ 
+  # Create Z scores using psycho package's standardize() function. 
+  # Makowski, (2018). The psycho Package: an Efficient and Publishing-Oriented Workflow for Psychological Science. Journal of Open Source Software, 3(22), 470. https://doi.org/10.21105/joss.00470
+  z_data <- reduced_data %>% standardize()
+  names(z_data) <- substring(names(z_data), 2)
+  z_data <- z_data %>% 
+                rename_at(.vars = vars(ends_with(".1")),
+                .funs = funs(sub("[.]1$", "", .)))
+  polarities <- polarities[, colnames(z_data)]
+  
+  
+  # Create a dataframe of z-scores, create mean score & add area codes on. 
+  z_data <- data.frame(z_data, lapply(colnames(z_data), polarity_check))
+  z_data <- z_data[, -c(1:ncol(polarities))]
+  colnames(z_data) <- colnames(polarities)
+  
+  # Get metadata for indicators and set them to global variables to use outside the function
+  # Get Summary statistics for benchmarking 
+  metadata_to_return <- indicator_metadata(IndicatorID = colnames(z_data))
+  summary_to_return <- create_summary_stats(reduced_data)
+  z_data$mean <- apply(z_data, 1, mean)
+  z_data$AreaCode <- wide_df$AreaCode
+  
+  
+  # z_mean <- z_data %>% select(mean, AreaCode)
+  return(list('data' = z_data, 'metadata' = metadata_to_return, 'summary' = summary_to_return, 'imp_img' = imp_img))
+}
+
+health_outcomes_returned <- analyze_df(health_outcomes_df)
+health_outcomes_processed <- health_outcomes_returned$data
+health_outcomes_metadata <- health_outcomes_returned$metadata
+health_outcomes_summary <- health_outcomes_returned$summary
+health_outcomes_imp_image <- health_outcomes_returned$imp_img
+risk_factors_returned <- analyze_df(risk_factors_df)
+risk_factors_processed <- risk_factors_returned$data
+risk_factors_metadata <- risk_factors_returned$metadata
+risk_factors_summary <- risk_factors_returned$summary
+risk_factors_imp_img <- risk_factors_returned$imp_img
+
+# Add imd to social determinants and recalc mean
+soc_det_returned <- analyze_df(social_determinants_df)
+soc_det_processed <- soc_det_returned$data
+soc_det_metadata <- soc_det_returned$metadata
+soc_det_summary <- soc_det_returned$summary
+soc_det_imp_img <- soc_det_returned$imp_img
+
+soc_det_processed <- merge(soc_det_processed, z_data_imd, by.x = 'AreaCode', by.y = 'UTLA18CD')
+soc_det_processed$mean <- apply(soc_det_processed[, !(names(soc_det_processed) %in% c('mean', 'AreaCode'))], 1, mean)
+
+z_means <- data.frame(health_outcomes_processed$mean, soc_det_processed$mean, risk_factors_processed$mean, risk_factors_processed$AreaCode)
+names(z_means) <- c("health_outcomes", "social_determinants", "risk_factors", "AreaCode")
+z_means$grand_mean <- apply(z_means[, !(names(z_means) %in% c('AreaCode'))], 1, mean)
+z_means$health_outcomes.rank <- rank(z_means$health_outcomes, na.last = FALSE)
+z_means$social_determinants.rank <- rank(z_means$social_determinants, na.last = FALSE)
+z_means$risk_factors.rank <- rank(z_means$risk_factors, na.last = FALSE)
+z_means$overall.rank <- rank(z_means$grand_mean, na.last = FALSE)
+
+utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
+# utlas <- geojson_read("Counties_and_Unitary_Authorities_December_2017_Full_Clipped_Boundaries_in_England_and_Wales.geojson", what = 'sp')
+# drop Wales
+utlas <- utlas[grep('E', utlas$ctyua17cd), ]
+utlas <- ms_simplify(utlas)
+utlas@data <- left_join(utlas@data, z_means, by = c("ctyua17cd" = "AreaCode"))
+pal_grand <- colorNumeric(palette = "Spectral", domain = utlas$grand_mean)
+pal_soc <- colorNumeric(palette = "Spectral", domain = utlas$social_determinants)
+pal_risk <- colorNumeric(palette = "Spectral", domain = utlas$risk_factors)
+pal_outcomes <- colorNumeric(palette = "Spectral", domain = utlas$health_outcomes)
+labs_grand_mean <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Health Index Score:', round(utlas@data[i, 'grand_mean'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'overall.rank'], '</p>' ) 
+})
+labs_soc <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Social Determinants Score:', round(utlas@data[i, 'social_determinants'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'social_determinants.rank'], '</p>' ) 
+})
+labs_risk <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Risk Factors Score:', round(utlas@data[i, 'risk_factors'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'risk_factors.rank'], '</p>' ) 
+})
+labs_outcomes <- lapply(seq(nrow(utlas@data)), function(i) {
+  paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
+          'Health Outcomes Score:', round(utlas@data[i, 'health_outcomes'], 3),'</p><p>', 
+          'Rank:', utlas@data[i, 'health_outcomes.rank'], '</p>' ) 
+})
+map1 <- leaflet(utlas) %>%
+  # Base groups
+  addTiles(group = "OSM (default)") %>%
+  # Overlay groups
+  # addCircles(~long, ~lat, ~10^mag/5, stroke = F, group = "Quakes") %>%
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_grand(grand_mean), group = "Health Index - Total", label = lapply(labs_grand_mean, HTML)) %>%
+  
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_soc(social_determinants), group = "Social Determinants", label = lapply(labs_soc, HTML)) %>%
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_risk(risk_factors), group = "Risk Factors", label = lapply(labs_risk, HTML)) %>%
+  addPolygons(
+    weight = 2, fillOpacity = 0.8, color = ~pal_outcomes(health_outcomes), group = "Health Outcomes", label = lapply(labs_outcomes, HTML)) %>%
+
+
+  # Layers control
+  addLayersControl(
+    baseGroups = c("Health Index - Total", "Social Determinants", "Risk Factors", "Health Outcomes"),
+    overlayGroups = c("OSM (default)"),
+    options = layersControlOptions(collapsed = FALSE)) %>%
+  addLegend("bottomright", pal = pal_grand, values = utlas$grand_mean, title = "Mean Z Scores for Index", opacity = 1)
+
+temp <- tempfile()
+download.file("http://s3.healthdata.org/gbd-api-2017-public/e9890501faf9f59e13ea28802f789ac0_files/IHME-GBD_2017_DATA-e9890501-1.zip", temp)
+gbd_data <- read_csv(unz(temp, "IHME-GBD_2017_DATA-e9890501-1.csv"))
+unlink(temp)
+gbd_data$gbd_rank <- rank(gbd_data$val)
+gbd_data$location[gbd_data$location == "St Helens"] <- "St. Helens"
+comparision <- left_join(utlas@data, gbd_data, by = c("ctyua17nm" = "location"))
+cor_test <- cor.test(~ overall.rank + gbd_rank, data = comparision, method = "spearman", continuity = F, conf.level = 0.95)
+summary_stats <- cbind(as.data.frame(soc_det_summary), as.data.frame(risk_factors_summary), as.data.frame(health_outcomes_summary))
+names(summary_stats) <- substring(names(summary_stats), 2)
+
+summary_stats <- as.data.frame(t(summary_stats))
+```
+
+## Developing a Composite Health Index for England
+
+
+## Background
+
+In 2018 the Chief Medical Officer called for the development of a Composite Health Index (CHI) to be developed in order to quantify health as a national asset and to track changes in health over time[^1].
+
+Dahlgren & Whitehead’s model suggests that health is determined by genetics, life stage, individual risk factors and behaviours, wider social determinants and the interaction between all of these[^2]. The variation in risk factors and social determinants is closely linked to deprivation, with the least deprived people having a life expectancy almost 10 years longer than the most deprived, and can expect almost 20 years more without living with a disability[^3]. Social determinants of health mutable with changes in policy within local and central government, growth of GDP, and changes in the distribution of wealth. Risk factors can be modified through policy and societal change. Health outcomes are a product of social determinants of health and individual risk factors’ interaction with health services, and so health service performance should be included. 
+
+Tackling health inequalities requires understanding social determinants of health, risk behaviours, and health outcomes, and tracking change over time across the whole population.
+
+
+## Aims
+
+This CHI will form a baseline measure of health from 2018 comprising of three component parts:
+
+
+
+*   Social determinants of health
+*   Individual risk factors and behaviours
+*   Health outcomes
+
+The CHI will be presented by geographical area as to allow policy-makers to better understand the needs of their local populations and target interventions effectively. 
+
+
+## Data Items
+
+The CHI is based on academic theory as to the core components of health across the life course. Data items were selected to fulfill the definitions of social determinants, risk factors, and health outcomes defined in the Fair Society, Healthy Lives report (2010) (Table 1).
+
+Table 1: Component parts of the determinants of health
+
+
+<table>
+  <tr>
+   <td>Social Determinants
+   </td>
+   <td>Risk Factors
+   </td>
+   <td>Health Outcomes
+   </td>
+  </tr>
+  <tr>
+   <td>Early years
+   </td>
+   <td>Alcohol 
+   </td>
+   <td>Loss of years of life
+   </td>
+  </tr>
+  <tr>
+   <td>Education 
+   </td>
+   <td>Smoking
+   </td>
+   <td>Loss of years of healthy life
+   </td>
+  </tr>
+  <tr>
+   <td>Work
+   </td>
+   <td>Obesity
+   </td>
+   <td>Economic costs
+   </td>
+  </tr>
+  <tr>
+   <td>Income
+   </td>
+   <td>Drug Use
+   </td>
+   <td>
+   </td>
+  </tr>
+  <tr>
+   <td>Communities
+   </td>
+   <td>
+   </td>
+   <td>
+   </td>
+  </tr>
+</table>
+
+
+Data items were selected from publicly available indicators that will be reproduced over time to satisfy the core components. This will allow benchmarking to current levels. A search was carried out using the terms in Table 1 on Public Health England’s (PHE) Fingertips platform and indicators were selected from a variety of profiles to provide coverage. The selected indicators are shown in Appendix 1. Some indicators are replicated in more than one component as they are important to more than one component. For example, infant mortality is important to both early years and loss of years of life and so it is included in both social determinants and health outcomes components. 
+
+Added to the social determinants component were data from the Indices of Multiple Deprivation (IMD) subdomains. These subdomains are designed to quantify different forms of deprivation that impact people’s lives in various ways. The subdomains are included as there is large geographic variation in performance across the subdomains that warrants extra granularity provided by the subdomain scores[^4]. For example, Wokingham has the lowest deprivation in the ‘income’ subdomain, but has high ‘geographical barriers’ deprivation.
+
+Most recent data were used, however this was not consistent as to when it was produced as different indicators have differing reproduction schedules and timeframes. This could introduce some confounds into the analysis as we are not always comparing performance within the same temporal period. The alternative was to limit our analysis to indicators that are produced over the same period, however this would have led to omitting potentially valuable information. For example suicide rate is an important health outcome measure that has to produced over a three year period to not be disclosive.
+
+
+## Methods
+
+Data items were retrieved using the FingertipsR package for PHE indicators, and using webscraping to retrieve IMD data. IMD data were segregated at Lower Super Output Area (LSOA) geographies, and so these were aggregated up to Upper Tier Local Authority (UTLA) using Office for National Statistics (ONS) lookup tables. Population weighted subdomain totals were used to calculate z-scores as a measure of geographical dispersion around the England mean. 
+
+Fingertips data were filtered to retrieve the most recent data points for each indicator, and also filtered to exclude any breakdowns by sex and limited to UTLAs. After this, UTLAs with over 50% missing data were excluded, which led to the removal of two areas; City of London and the Isles of Scilly. Indicators with more than 20% data missing were removed from the analysis as they are deemed to be incomplete. 
+
+Missing data from the remaining indicators were imputed using multiple imputation. Data are fit to 4 Bayesian generalized linear models over 30 iterations, and missing values predicted using these models, with the best fit being selected for imputation[^5]. Heatmaps of the spread of the data before and after imputation are shown in Figure 1. 
+
+Normality of distribution within each of the indicators was assumed using the Central Limit Theorem (CLT). As the samples sizes for each of the indicators was very large, CLT suggests that for an indicator
+
+[insert equation here]
+
+Indicators were tested for covariance and indicators using a pairwise correlation matrix with those indicators with an [] selected for removal, with the most globally correlated indicator being removed (Table 2).
+
+Z-scores were calculated for all indicators, and mean z-scores and ranks calculated for components, polarity switched where necessary. These were then aggregated into the CHI giving equal weighting to each of the components. Summary statistics for each indicator were output as a baseline measure for future years. 
+
+```{r imp_imgs, echo=FALSE}
+soc_det_imp_img
+risk_factors_imp_img
+health_outcomes_imp_image
+```
+Figure 1: Heatmaps showing spread of data, missing data and imputed data for a) Social Determinants b) Risk Factors, and c) Health Outcomes
+
+Table 2: Indicators from each component removed for covariance reasons
+
+
+<table>
+  <tr>
+   <td>Social Determinants
+   </td>
+   <td>Risk Factors
+   </td>
+   <td>Health Outcomes
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>Smoking attributable mortality
+<p>
+CHD: Recorded prevalence (all ages)
+   </td>
+   <td>Under 75 mortality rate from cardiovascular diseases considered preventable
+<p>
+Under 75 mortality rate from cancer
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Under 75 mortality rate from cancer considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Under 75 mortality rate from liver disease
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Under 75 mortality rate from respiratory disease
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Hip fractures in people aged 65 and over
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Mortality rate from causes considered preventable
+   </td>
+  </tr>
+</table>
+
+
+
+## Results
+
+A CHI based on publicly available, national, long-term data was created based on three components; social determinants of health, individual risk factors, and health outcomes. 
+```{r chi_df, echo=F}
+kable(z_means[, order(names(z_means))]) %>% kable_styling(fixed_thead = T, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+The contribution of individual indicators to each component was calculated, and each component was given equal weighing in the construction of the CHI. This index was mapped to UTLAs to give an overall view of the distribution of health across England (Figure 2).
+
+```{r map, echo=FALSE, out.width = '100%'}
+map1
+```
+
+Figure 2: The CHI total mapped to UTLAs in England. Lower Mean Z Scores indicator lower health in that geographical area.
+
+There were a total of 79 Fingertips indicators and 16 IMD subdomains included after exclusions for missing data and collinearity (Appendix 2).  It is possible to disaggregate the CHI into each component (Figure 3). It is also possible to analyse the contribution of each indicator to the index. The plotted outputs are designed to highlight the areas with greatest need.
+
+Rankings were also produced for the CHI and its components, primarily as a tool to validate the index against other indices that use differing methodologies. Outputs of the top 5 ranked areas (most need) are shown in Table 3.
+
+Table 3: CHI and component scores (ranks) for the 5 areas identified as having the greatest need. 
+
+
+<table>
+  <tr>
+   <td>Area
+   </td>
+   <td>CHI
+   </td>
+   <td>Social Determinants Component
+   </td>
+   <td>Risk Factors Component
+   </td>
+   <td>Health Outcomes Component
+   </td>
+  </tr>
+  <tr>
+   <td>Blackpool
+   </td>
+   <td>-1.132 (1)
+   </td>
+   <td>-0.911 (2)
+   </td>
+   <td>-0.959 (3)
+   </td>
+   <td>-1.53 (1)
+   </td>
+  </tr>
+  <tr>
+   <td>Kingston upon Hull
+   </td>
+   <td>-1.079 (2)
+   </td>
+   <td>-0.931 (1)
+   </td>
+   <td>-1.055 (2)
+   </td>
+   <td>-1.241 (2)
+   </td>
+  </tr>
+  <tr>
+   <td>Knowsley
+   </td>
+   <td>-0.885 (3)
+   </td>
+   <td>-0.871 (3)
+   </td>
+   <td>-0.757 (6)
+   </td>
+   <td>-1.027 (5)
+   </td>
+  </tr>
+  <tr>
+   <td>Middlesbrough
+   </td>
+   <td>-0.873 (4)
+   </td>
+   <td>-0.749 (7)
+   </td>
+   <td>-0.764 (5)
+   </td>
+   <td>-1.107 (3)
+   </td>
+  </tr>
+  <tr>
+   <td>Hartlepool
+   </td>
+   <td>-0.961 (5)
+   </td>
+   <td>-0.511 (12)
+   </td>
+   <td>-1.091 (1)
+   </td>
+   <td>-0.961 (8)
+   </td>
+  </tr>
+</table>
+
+
+A comparative analysis were undertaken to verify the validity of CHI. Health Adjusted Life Expectancy (HALE) estimates, produced as part of the Global Burden of Disease study[^6], was selected as a comparator. Ranks were compared using a Spearman rank correlation test. There was a significant strong positive correlation between CHI and HALE.
+
+```{r corr_, echo=FALSE}
+cor_test
+```
+To track change over time, the means and standard deviations from this analysis are to be used in future z-score calculations to ensure the baseline stays stable. To this end, descriptive statistics were output for reference in future years (Appendix 3). 
+
+
+## Discussion
+
+A CHI was created to quantify, and track changes to, health across England. The outputs from this index appear to be in line with alternative measures of overall health, and also in line with previous literature on health inequalities. CHI shows a clear rural/urban divide that has been previously described[^7][^8]. There is also a north/south divide viewable if a line is drawn from the Bristol channel to the Wash, as has been previously described[^9][^10]. In addition to this, outputs from CHI may provide evidence for the ‘healthy London effect’, where London overperforms in health outcomes given the social determinants present (Figure 4)[^11].
+
+CHI highlights previously described health inequality divides and strongly correlates with alternative measures. This suggests that CHI is a robust measure of health across England that can be used as a baseline measure for future reference and evaluation. Each indicator is given an equal weighting within the construct of each component, and each component has an equal weighting in CHI. There might an increase in accuracy with a more sophisticated weighting mechanism in future. There is also a risk of changes to the methods used in creating the indicators used in CHI, and this would have to be accounted for in future years. Effort should be made to replicate CHI at clinical geographies, such as Clinical Commissioning Groups, to allow more targeted policy action.  
+
+INSERT STAKEHOLDER ANALYSIS HERE
+
+
+## Appendices
+
+Appendix 1: Fingertips indicators selected to be included in analysis from Fingertips platform for each component before tests for missing data or covariance.
+
+
+<table>
+  <tr>
+   <td>Social Determinants
+   </td>
+   <td>Risk Factors
+   </td>
+   <td>Health Outcomes
+   </td>
+  </tr>
+  <tr>
+   <td>Population vaccination coverage - MMR for two doses (5 years old)
+   </td>
+   <td>Fraction of mortality attributable to particulate air pollution
+   </td>
+   <td>Sickness absence - the percentage of working days lost due to sickness absence
+   </td>
+  </tr>
+  <tr>
+   <td>School readiness: Good level of development at age 5
+   </td>
+   <td>Killed and seriously injured (KSI) casualties on the roads
+   </td>
+   <td>Low birth weight of term babies: % of all live births
+   </td>
+  </tr>
+  <tr>
+   <td>Gap in the employment rate between those with a long-term health condition and the overall employment rate
+   </td>
+   <td>Smoking status at time of delivery
+   </td>
+   <td>Infant mortality
+   </td>
+  </tr>
+  <tr>
+   <td>Enough social contact in adult carers: % of adult carers
+   </td>
+   <td>Child excess weight in 4-5 and 10-11 year olds - 4-5 year olds
+   </td>
+   <td>Proportion of five year old children free from dental decay
+   </td>
+  </tr>
+  <tr>
+   <td>Low birth weight of term babies: % of all live births
+   </td>
+   <td>Child excess weight in 4-5 and 10-11 year olds - 10-11 year olds
+   </td>
+   <td>Mortality rate from causes considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Breastfeeding prevalence at 6-8 weeks after birth
+   </td>
+   <td>Proportion of the population meeting the recommended '5-a-day' on a 'usual day' (adults)
+   </td>
+   <td>Under 75 mortality rate from all cardiovascular diseases
+   </td>
+  </tr>
+  <tr>
+   <td>Smoking at time of delivery: % of mothers
+   </td>
+   <td>Excess Weight in Adults
+   </td>
+   <td>Under 75 mortality rate from cardiovascular diseases considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Under 18 conceptions
+   </td>
+   <td>Physically active adults (aged 19+)
+   </td>
+   <td>Under 75 mortality rate from cancer
+   </td>
+  </tr>
+  <tr>
+   <td>Excess weight in Reception year: % of children aged 4-5
+   </td>
+   <td>Smoking prevalence in adults (aged 18+)
+   </td>
+   <td>Under 75 mortality rate from cancer considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of children aged 2-2½yrs offered ASQ-3 as part of the Healthy Child Programme or integrated review
+   </td>
+   <td>Estimated diabetes diagnosis rate
+   </td>
+   <td>Under 75 mortality rate from liver disease
+   </td>
+  </tr>
+  <tr>
+   <td>Hospital admissions caused by unintentional and deliberate injuries in children (aged 0-4 years)
+   </td>
+   <td>Admission episodes for alcohol-related conditions
+   </td>
+   <td>Under 75 mortality rate from liver disease considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Successful completion of drug treatment - opiate users: % who do not re-present within 6 months
+   </td>
+   <td>Average number of portions of fruit consumed daily at age 15 (WAY survey)
+   </td>
+   <td>Under 75 mortality rate from respiratory disease
+   </td>
+  </tr>
+  <tr>
+   <td>Successful completion of drug treatment - non-opiate users: % who do not re-present within 6 months
+   </td>
+   <td>Hypertension: Recorded prevalence (all ages)
+   </td>
+   <td>Under 75 mortality rate from respiratory disease considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Successful completion of treatment for alcohol
+   </td>
+   <td>Obesity: Recorded prevalence (aged 18+)
+   </td>
+   <td>Mortality rate from a range of specified communicable diseases, including influenza
+   </td>
+  </tr>
+  <tr>
+   <td>Self-reported well-being: % of people with a high anxiety score
+   </td>
+   <td>Depression recorded prevalence (QOF): % of practice register aged 18+
+   </td>
+   <td>Suicide rate
+   </td>
+  </tr>
+  <tr>
+   <td>Infant mortality
+   </td>
+   <td>Stroke: Recorded prevalence (all ages)
+   </td>
+   <td>Excess under 75 mortality rate in adults with serious mental illness
+   </td>
+  </tr>
+  <tr>
+   <td>Long-term unemployment: rate per 1,000 working age population
+   </td>
+   <td>CHD: Recorded prevalence (all ages)
+   </td>
+   <td>Emergency readmissions within 30 days of discharge from hospital
+   </td>
+  </tr>
+  <tr>
+   <td>STI testing rate (exc chlamydia aged <25) / 100,000
+   </td>
+   <td>Obese children (10-11 years)
+   </td>
+   <td>Proportion of adults in the population in contact with secondary mental health services
+   </td>
+  </tr>
+  <tr>
+   <td>HIV testing uptake, total (%)
+   </td>
+   <td>Admission episodes for alcohol-specific conditions - Under 18s
+   </td>
+   <td>Health related quality of life for older people
+   </td>
+  </tr>
+  <tr>
+   <td>16-18 year olds not in education, employment or training: % of 16-18 year olds
+   </td>
+   <td>Smoking attributable mortality
+   </td>
+   <td>Hip fractures in people aged 65 and over
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of supported working age adults with learning disability living in unsettled accommodation (%)
+   </td>
+   <td>Mortality rate from lung cancer
+   </td>
+   <td>Preventable sight loss - age related macular degeneration (AMD)
+   </td>
+  </tr>
+  <tr>
+   <td>Adults receiving long term learning disabilities support from local authority per 100 people on GP learning disabilities register
+   </td>
+   <td>Under 75 mortality from colorectal cancer
+   </td>
+   <td>Hip fractures in people aged 65 and over - aged 65-79
+   </td>
+  </tr>
+  <tr>
+   <td>People taking up an NHS Health Check invite
+   </td>
+   <td>Under 75 Mortality rate from breast cancer
+   </td>
+   <td>Preventable sight loss - glaucoma
+   </td>
+  </tr>
+  <tr>
+   <td>Unemployment: % of working age population
+   </td>
+   <td>Children killed and seriously injured (KSI) on England's roads
+   </td>
+   <td>Hip fractures in people aged 65 and over - aged 80+
+   </td>
+  </tr>
+  <tr>
+   <td>Claimants of benefits due to alcoholism
+   </td>
+   <td>Density of fast food outlets
+   </td>
+   <td>Preventable sight loss - diabetic eye disease
+   </td>
+  </tr>
+  <tr>
+   <td>Economic inactivity rate
+   </td>
+   <td>
+   </td>
+   <td>Excess winter deaths index (single year, all ages)
+   </td>
+  </tr>
+  <tr>
+   <td>% reporting depression or anxiety
+   </td>
+   <td>
+   </td>
+   <td>Preventable sight loss - sight loss certifications
+   </td>
+  </tr>
+  <tr>
+   <td>A&E attendances (0-4 years)
+   </td>
+   <td>
+   </td>
+   <td>Excess winter deaths index (single year, age 85+)
+   </td>
+  </tr>
+  <tr>
+   <td>Hospital admissions caused by unintentional and deliberate injuries in children (aged 0-4 years)
+   </td>
+   <td>
+   </td>
+   <td>Excess winter deaths index (3 years, all ages)
+   </td>
+  </tr>
+  <tr>
+   <td>Emergency admissions (aged 0-4)
+   </td>
+   <td>
+   </td>
+   <td>Excess winter deaths index (3 years, age 85+)
+   </td>
+  </tr>
+  <tr>
+   <td>A&E attendances (0-4 years)
+   </td>
+   <td>
+   </td>
+   <td>4.16 -  Estimated dementia diagnosis rate (aged 65+)
+   </td>
+  </tr>
+  <tr>
+   <td>Emergency admissions (aged 0-4)
+   </td>
+   <td>
+   </td>
+   <td>Healthy life expectancy at birth
+   </td>
+  </tr>
+  <tr>
+   <td>Children with one or more decayed,  missing or filled teeth
+   </td>
+   <td>
+   </td>
+   <td>Life Expectancy at birth
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children at or above expected level of development in all five areas of development at 2-2½ years
+   </td>
+   <td>
+   </td>
+   <td>Life expectancy at 65
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children at or above expected level of development in communication skills at 2-2½ years
+   </td>
+   <td>
+   </td>
+   <td>Inequality in life expectancy at birth
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children at or above expected level of development in gross motor skills at 2-2½ years
+   </td>
+   <td>
+   </td>
+   <td>Number of UTLAs where inequality in life expectancy at birth has decreased
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children at or above expected level of development in fine motor skills at 2-2½ years
+   </td>
+   <td>
+   </td>
+   <td>Inequality in life expectancy at 65
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children at or above expected level of development in problem solving skills at 2-2½ years
+   </td>
+   <td>
+   </td>
+   <td>Gap in life expectancy at birth between each local authority and England as a whole
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children at or above expected level of development in personal-social skills at 2-2½ years
+   </td>
+   <td>
+   </td>
+   <td>Inequality in healthy life expectancy at birth ENGLAND
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of New Birth Visits (NBVs) completed within 14 days
+   </td>
+   <td>
+   </td>
+   <td>Inequality in healthy life expectancy at birth LA
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of infants receiving a 6 to 8 week review
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of hypertension (all ages) - retired
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of children receiving a 12-month review
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of CHD (all ages) - retired
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of children who received a 2-2½ year review
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of stroke (all ages) - retired
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children achieving at least an expected level of development across all learning goals in communication and language.
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of CVD (all ages) - retired
+   </td>
+  </tr>
+  <tr>
+   <td>Access to NHS dental services - successfully obtained a dental appointment
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of COPD (all ages) - retired
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of diagnosed hypertension (16+)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of undiagnosed hypertension (16+)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of depression (all ages)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of CHD (55-79 yrs)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of CHD (55-79 yrs)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of stroke (55-79 yrs)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of peripheral arterial disease (PAD) (55-79 yrs)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of peripheral arterial disease (PAD) (55-79 yrs)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of Heart failure (16+)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Estimated prevalence of COPD (all ages)
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Rate of deaths from Cardiovascular Disease among people aged 65 years and over
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Rate of deaths from Cancer among people aged 65 years and over
+   </td>
+  </tr>
+  <tr>
+   <td>
+   </td>
+   <td>
+   </td>
+   <td>Rate of deaths from Respiratory Disease among people aged 65 years and over
+   </td>
+  </tr>
+</table>
+
+
+Appendix 2: Final indicators included in the CHI from Fingertips and IMD in the components to which they contributed. . 
+
+
+<table>
+  <tr>
+   <td>Social Determinants
+   </td>
+   <td>Risk Factors
+   </td>
+   <td>Health Outcomes
+   </td>
+  </tr>
+  <tr>
+   <td>Population vaccination coverage - MMR for two doses (5 years old)
+   </td>
+   <td>Fraction of annual all-cause adult mortality attributable to anthropogenic (human-made) particulate air pollution (measured as fine particulate matter, PM2.5*).
+   </td>
+   <td>Low birth weight of term babies: % of all live births
+   </td>
+  </tr>
+  <tr>
+   <td>School readiness: Good level of development at age 5
+   </td>
+   <td>Killed and seriously injured on roads
+   </td>
+   <td>Under 75 mortality rate from all cardiovascular diseases
+   </td>
+  </tr>
+  <tr>
+   <td>Gap in the employment rate between those with a long-term health condition and the overall employment rate
+   </td>
+   <td>Child excess weight in 4-5 and 10-11 year olds - 4-5 year olds
+   </td>
+   <td>Under 75 mortality rate from liver disease considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Enough social contact in adult carers: % of adult carers
+   </td>
+   <td>Child excess weight in 4-5 and 10-11 year olds - 10-11 year olds
+   </td>
+   <td>Under 75 mortality rate from respiratory disease considered preventable
+   </td>
+  </tr>
+  <tr>
+   <td>Low birth weight of term babies: % of all live births
+   </td>
+   <td>Proportion of the population meeting the recommended '5-a-day' on a 'usual day' (adults)
+   </td>
+   <td>Suicide rate
+   </td>
+  </tr>
+  <tr>
+   <td>Excess weight in Reception year: % of children aged 4-5
+   </td>
+   <td>Percentage of adults (aged 18+) classified as overweight or obese - current method
+   </td>
+   <td>Emergency readmissions within 30 days of discharge from hospital
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of children aged 2-2½yrs offered ASQ-3 as part of the Healthy Child Programme or integrated review
+   </td>
+   <td>Physically active adults (aged 19+)
+   </td>
+   <td>Preventable sight loss - age related macular degeneration (AMD)
+   </td>
+  </tr>
+  <tr>
+   <td>Hospital admissions caused by unintentional and deliberate injuries in children (aged 0-4 years)
+   </td>
+   <td>Smoking prevalence in adults (aged 18+)
+   </td>
+   <td>Preventable sight loss - glaucoma
+   </td>
+  </tr>
+  <tr>
+   <td>Successful completion of drug treatment - opiate users: % who do not re-present within 6 months
+   </td>
+   <td>Estimated diabetes diagnosis rate
+   </td>
+   <td>Preventable sight loss - sight loss certifications
+   </td>
+  </tr>
+  <tr>
+   <td>Successful completion of drug treatment - non-opiate users: % who do not re-present within 6 months
+   </td>
+   <td>Admission episodes for alcohol-related conditions
+   </td>
+   <td>Hip fractures in people aged 65 and over - aged 65-79
+   </td>
+  </tr>
+  <tr>
+   <td>Successful completion of treatment for alcohol
+   </td>
+   <td>Average number of portions of fruit consumed daily at age 15 (WAY survey)
+   </td>
+   <td>Hip fractures in people aged 65 and over - aged 80+
+   </td>
+  </tr>
+  <tr>
+   <td>Self-reported well-being: % of people with a high anxiety score
+   </td>
+   <td>Hypertension: Recorded prevalence (all ages)
+   </td>
+   <td>Sickness absence - the percentage of working days lost due to sickness absence
+   </td>
+  </tr>
+  <tr>
+   <td>Infant mortality
+   </td>
+   <td>Obesity: Recorded prevalence (aged 18+)
+   </td>
+   <td>Excess winter deaths index (single year, all ages)
+   </td>
+  </tr>
+  <tr>
+   <td>Long-term unemployment: rate per 1,000 working age population
+   </td>
+   <td>Depression recorded prevalence (QOF): % of practice register aged 18+
+   </td>
+   <td>Excess winter deaths index (single year, age 85+)
+   </td>
+  </tr>
+  <tr>
+   <td>STI testing rate (exc chlamydia aged <25) / 100,000
+   </td>
+   <td>Stroke: Recorded prevalence (all ages)
+   </td>
+   <td>Excess winter deaths index (3 years, all ages)
+   </td>
+  </tr>
+  <tr>
+   <td>HIV testing uptake, total (%)
+   </td>
+   <td>Admission episodes for alcohol-specific conditions - Under 18s
+   </td>
+   <td>Excess winter deaths index (3 years, age 85+)
+   </td>
+  </tr>
+  <tr>
+   <td>16-18 year olds not in education, employment or training: % of 16-18 year olds
+   </td>
+   <td>Deaths from lung cancer
+   </td>
+   <td>Excess under 75 mortality rate in adults with serious mental illness
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of supported working age adults with learning disability living in unsettled accommodation (%)
+   </td>
+   <td>Under 75 mortality from colorectal cancer
+   </td>
+   <td>Health related quality of life for older people
+   </td>
+  </tr>
+  <tr>
+   <td>Adults receiving long term learning disabilities support from local authority per 100 people on GP learning disabilities register
+   </td>
+   <td>Under 75 Mortality rate from breast cancer
+   </td>
+   <td>Infant mortality
+   </td>
+  </tr>
+  <tr>
+   <td>People taking up an NHS Health Check invite
+   </td>
+   <td>Children killed and seriously injured (KSI) on England's roads
+   </td>
+   <td>Mortality rate from a range of specified communicable diseases, including influenza
+   </td>
+  </tr>
+  <tr>
+   <td>Unemployment: % of working age population
+   </td>
+   <td>-
+   </td>
+   <td>Proportion of adults in the population in contact with secondary mental health services
+   </td>
+  </tr>
+  <tr>
+   <td>Claimants of benefits due to alcoholism
+   </td>
+   <td>-
+   </td>
+   <td>Proportion of five year old children free from dental decay
+   </td>
+  </tr>
+  <tr>
+   <td>Economic inactivity rate
+   </td>
+   <td>-
+   </td>
+   <td>Rate of deaths from Cardiovascular Disease among people aged 65 years and over
+   </td>
+  </tr>
+  <tr>
+   <td>% reporting depression or anxiety
+   </td>
+   <td>-
+   </td>
+   <td>Rate of deaths from Cancer among people aged 65 years and over
+   </td>
+  </tr>
+  <tr>
+   <td>A&E attendances (0-4 years)
+   </td>
+   <td>-
+   </td>
+   <td>Rate of deaths from Respiratory Disease among people aged 65 years and over
+   </td>
+  </tr>
+  <tr>
+   <td>Emergency admissions (aged 0-4)
+   </td>
+   <td>-
+   </td>
+   <td>Estimated dementia diagnosis rate (aged 65+)
+   </td>
+  </tr>
+  <tr>
+   <td>Children with one or more decayed, missing or filled teeth
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of New Birth Visits (NBVs) completed within 14 days
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of infants receiving a 6 to 8 week review
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of children receiving a 12-month review
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Proportion of children who received a 2-2½ year review
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Percentage of children achieving at least an expected level of development across all learning goals in communication and language.
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Access to NHS dental services - successfully obtained a dental appointment
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Income Score (rate)
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Employment Score (rate)
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Education, Skills and Training Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Health Deprivation and Disability Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Crime Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Barriers to Housing and Services Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Living Environment Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Income Deprivation Affecting Children Index (IDACI) Score (rate)
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Income Deprivation Affecting Older People (IDAOPI) Score (rate)
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Children and Young People Sub-domain Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Adult Skills Sub-domain Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Geographical Barriers Sub-domain Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Wider Barriers Sub-domain Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Indoors Sub-domain Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+  <tr>
+   <td>Outdoors Sub-domain Score
+   </td>
+   <td>-
+   </td>
+   <td>-
+   </td>
+  </tr>
+</table>
+
+
+Appendix 3: Baseline measurements of component parts of CHI for future evaluation against.
+
+
+<table>
+  <tr>
+   <td>Indicator
+   </td>
+   <td>Stand dev
+   </td>
+   <td>Mean
+   </td>
+   <td>Median
+   </td>
+   <td>Coefficient of Variation
+   </td>
+   <td>Minimum
+   </td>
+   <td>Maximum
+   </td>
+  </tr>
+  <tr>
+   <td>X10501
+   </td>
+   <td>1.353
+   </td>
+   <td>4.218
+   </td>
+   <td>4.05
+   </td>
+   <td>0.321
+   </td>
+   <td>1.48
+   </td>
+   <td>7.911
+   </td>
+  </tr>
+  <tr>
+   <td>X20101
+   </td>
+   <td>0.64
+   </td>
+   <td>2.845
+   </td>
+   <td>2.77
+   </td>
+   <td>0.225
+   </td>
+   <td>1.57
+   </td>
+   <td>5.3
+   </td>
+  </tr>
+  <tr>
+   <td>X20601
+   </td>
+   <td>2.886
+   </td>
+   <td>22.52
+   </td>
+   <td>22.59
+   </td>
+   <td>0.128
+   </td>
+   <td>13.92
+   </td>
+   <td>29.62
+   </td>
+  </tr>
+  <tr>
+   <td>X22304
+   </td>
+   <td>2.749
+   </td>
+   <td>20.39
+   </td>
+   <td>20.47
+   </td>
+   <td>0.135
+   </td>
+   <td>13.94
+   </td>
+   <td>30.47
+   </td>
+  </tr>
+  <tr>
+   <td>X30311
+   </td>
+   <td>6.5
+   </td>
+   <td>87.02
+   </td>
+   <td>88.91
+   </td>
+   <td>0.075
+   </td>
+   <td>66.66
+   </td>
+   <td>95.77
+   </td>
+  </tr>
+  <tr>
+   <td>X90244
+   </td>
+   <td>1.983
+   </td>
+   <td>6.806
+   </td>
+   <td>6.695
+   </td>
+   <td>0.291
+   </td>
+   <td>1.99
+   </td>
+   <td>13.42
+   </td>
+  </tr>
+  <tr>
+   <td>X90245
+   </td>
+   <td>8.34
+   </td>
+   <td>35.91
+   </td>
+   <td>35.75
+   </td>
+   <td>0.232
+   </td>
+   <td>16.92
+   </td>
+   <td>60.47
+   </td>
+  </tr>
+  <tr>
+   <td>X90282
+   </td>
+   <td>3.639
+   </td>
+   <td>11.98
+   </td>
+   <td>11.8
+   </td>
+   <td>0.304
+   </td>
+   <td>0.2
+   </td>
+   <td>21.8
+   </td>
+  </tr>
+  <tr>
+   <td>X90631
+   </td>
+   <td>3.184
+   </td>
+   <td>71.47
+   </td>
+   <td>71.33
+   </td>
+   <td>0.045
+   </td>
+   <td>63.86
+   </td>
+   <td>80.5
+   </td>
+  </tr>
+  <tr>
+   <td>X90638
+   </td>
+   <td>6.801
+   </td>
+   <td>34.67
+   </td>
+   <td>34.4
+   </td>
+   <td>0.196
+   </td>
+   <td>21.5
+   </td>
+   <td>55
+   </td>
+  </tr>
+  <tr>
+   <td>X90809
+   </td>
+   <td>276.7
+   </td>
+   <td>659.2
+   </td>
+   <td>588.7
+   </td>
+   <td>0.42
+   </td>
+   <td>321.3
+   </td>
+   <td>2011
+   </td>
+  </tr>
+  <tr>
+   <td>X90820
+   </td>
+   <td>7.702
+   </td>
+   <td>24.74
+   </td>
+   <td>22.99
+   </td>
+   <td>0.311
+   </td>
+   <td>10.4
+   </td>
+   <td>47.1
+   </td>
+  </tr>
+  <tr>
+   <td>X90832
+   </td>
+   <td>41.63
+   </td>
+   <td>124.8
+   </td>
+   <td>117.9
+   </td>
+   <td>0.334
+   </td>
+   <td>51.49
+   </td>
+   <td>272.6
+   </td>
+  </tr>
+  <tr>
+   <td>X91116
+   </td>
+   <td>11.22
+   </td>
+   <td>48.41
+   </td>
+   <td>47.74
+   </td>
+   <td>0.232
+   </td>
+   <td>17
+   </td>
+   <td>100
+   </td>
+  </tr>
+  <tr>
+   <td>X91126
+   </td>
+   <td>1.475
+   </td>
+   <td>4.675
+   </td>
+   <td>4.55
+   </td>
+   <td>0.316
+   </td>
+   <td>1.7
+   </td>
+   <td>10.3
+   </td>
+  </tr>
+  <tr>
+   <td>X91133
+   </td>
+   <td>2.61
+   </td>
+   <td>3.852
+   </td>
+   <td>3.333
+   </td>
+   <td>0.678
+   </td>
+   <td>0.714
+   </td>
+   <td>13.3
+   </td>
+  </tr>
+  <tr>
+   <td>X91307
+   </td>
+   <td>9971
+   </td>
+   <td>17441
+   </td>
+   <td>13983
+   </td>
+   <td>0.572
+   </td>
+   <td>8021
+   </td>
+   <td>59480
+   </td>
+  </tr>
+  <tr>
+   <td>X91463
+   </td>
+   <td>77.34
+   </td>
+   <td>143.5
+   </td>
+   <td>125.1
+   </td>
+   <td>0.539
+   </td>
+   <td>38.52
+   </td>
+   <td>575.2
+   </td>
+  </tr>
+  <tr>
+   <td>X91524
+   </td>
+   <td>11.63
+   </td>
+   <td>75.98
+   </td>
+   <td>79.34
+   </td>
+   <td>0.153
+   </td>
+   <td>30.48
+   </td>
+   <td>91.94
+   </td>
+  </tr>
+  <tr>
+   <td>X92196
+   </td>
+   <td>1.167
+   </td>
+   <td>3.826
+   </td>
+   <td>3.59
+   </td>
+   <td>0.305
+   </td>
+   <td>1.742
+   </td>
+   <td>8.053
+   </td>
+  </tr>
+  <tr>
+   <td>X92447
+   </td>
+   <td>8.075
+   </td>
+   <td>39.13
+   </td>
+   <td>39.62
+   </td>
+   <td>0.206
+   </td>
+   <td>18.16
+   </td>
+   <td>54.89
+   </td>
+  </tr>
+  <tr>
+   <td>X92477
+   </td>
+   <td>55.55
+   </td>
+   <td>162.4
+   </td>
+   <td>161.9
+   </td>
+   <td>0.342
+   </td>
+   <td>56.94
+   </td>
+   <td>297.3
+   </td>
+  </tr>
+  <tr>
+   <td>X92543
+   </td>
+   <td>9.696
+   </td>
+   <td>91.06
+   </td>
+   <td>93.7
+   </td>
+   <td>0.106
+   </td>
+   <td>56.9
+   </td>
+   <td>102.4
+   </td>
+  </tr>
+  <tr>
+   <td>X92785
+   </td>
+   <td>2.296
+   </td>
+   <td>94.46
+   </td>
+   <td>94.8
+   </td>
+   <td>0.024
+   </td>
+   <td>86.3
+   </td>
+   <td>98.8
+   </td>
+  </tr>
+  <tr>
+   <td>X92899
+   </td>
+   <td>4.157
+   </td>
+   <td>22.24
+   </td>
+   <td>21.45
+   </td>
+   <td>0.187
+   </td>
+   <td>13.3
+   </td>
+   <td>33.9
+   </td>
+  </tr>
+  <tr>
+   <td>X93131
+   </td>
+   <td>8.061
+   </td>
+   <td>19.39
+   </td>
+   <td>19.52
+   </td>
+   <td>0.416
+   </td>
+   <td>1.29
+   </td>
+   <td>36.21
+   </td>
+  </tr>
+  <tr>
+   <td>X93175
+   </td>
+   <td>11
+   </td>
+   <td>56.75
+   </td>
+   <td>55.84
+   </td>
+   <td>0.194
+   </td>
+   <td>32.03
+   </td>
+   <td>100.2
+   </td>
+  </tr>
+  <tr>
+   <td>X93376
+   </td>
+   <td>2.455
+   </td>
+   <td>14.06
+   </td>
+   <td>13.89
+   </td>
+   <td>0.175
+   </td>
+   <td>8.974
+   </td>
+   <td>19.85
+   </td>
+  </tr>
+  <tr>
+   <td>X93469
+   </td>
+   <td>9.129
+   </td>
+   <td>87.87
+   </td>
+   <td>90.07
+   </td>
+   <td>0.104
+   </td>
+   <td>33.15
+   </td>
+   <td>98.95
+   </td>
+  </tr>
+  <tr>
+   <td>X93470
+   </td>
+   <td>14.92
+   </td>
+   <td>84.98
+   </td>
+   <td>89.01
+   </td>
+   <td>0.176
+   </td>
+   <td>14.09
+   </td>
+   <td>112.7
+   </td>
+  </tr>
+  <tr>
+   <td>X93471
+   </td>
+   <td>15.86
+   </td>
+   <td>84.04
+   </td>
+   <td>88.63
+   </td>
+   <td>0.189
+   </td>
+   <td>9.955
+   </td>
+   <td>99.78
+   </td>
+  </tr>
+  <tr>
+   <td>X93472
+   </td>
+   <td>16.42
+   </td>
+   <td>77.39
+   </td>
+   <td>80.47
+   </td>
+   <td>0.212
+   </td>
+   <td>0.939
+   </td>
+   <td>101.1
+   </td>
+  </tr>
+  <tr>
+   <td>X93494
+   </td>
+   <td>3.278
+   </td>
+   <td>82.27
+   </td>
+   <td>82.4
+   </td>
+   <td>0.04
+   </td>
+   <td>74.31
+   </td>
+   <td>94.8
+   </td>
+  </tr>
+  <tr>
+   <td>X212
+   </td>
+   <td>0.49
+   </td>
+   <td>1.731
+   </td>
+   <td>1.777
+   </td>
+   <td>0.283
+   </td>
+   <td>0.719
+   </td>
+   <td>2.674
+   </td>
+  </tr>
+  <tr>
+   <td>X219
+   </td>
+   <td>2.364
+   </td>
+   <td>13.83
+   </td>
+   <td>14
+   </td>
+   <td>0.171
+   </td>
+   <td>7.482
+   </td>
+   <td>18.04
+   </td>
+  </tr>
+  <tr>
+   <td>X848
+   </td>
+   <td>2.099
+   </td>
+   <td>9.835
+   </td>
+   <td>9.747
+   </td>
+   <td>0.213
+   </td>
+   <td>5.375
+   </td>
+   <td>15.57
+   </td>
+  </tr>
+  <tr>
+   <td>X1203
+   </td>
+   <td>15.6
+   </td>
+   <td>60.03
+   </td>
+   <td>58.64
+   </td>
+   <td>0.26
+   </td>
+   <td>33.52
+   </td>
+   <td>106.6
+   </td>
+  </tr>
+  <tr>
+   <td>X11001
+   </td>
+   <td>11.76
+   </td>
+   <td>37.94
+   </td>
+   <td>36.19
+   </td>
+   <td>0.31
+   </td>
+   <td>16.99
+   </td>
+   <td>79.62
+   </td>
+  </tr>
+  <tr>
+   <td>X20601.1
+   </td>
+   <td>2.887
+   </td>
+   <td>22.52
+   </td>
+   <td>22.59
+   </td>
+   <td>0.128
+   </td>
+   <td>13.92
+   </td>
+   <td>29.62
+   </td>
+  </tr>
+  <tr>
+   <td>X20602
+   </td>
+   <td>4.367
+   </td>
+   <td>34.81
+   </td>
+   <td>34.67
+   </td>
+   <td>0.125
+   </td>
+   <td>21.71
+   </td>
+   <td>44.5
+   </td>
+  </tr>
+  <tr>
+   <td>X30101
+   </td>
+   <td>1.026
+   </td>
+   <td>5.092
+   </td>
+   <td>5.023
+   </td>
+   <td>0.202
+   </td>
+   <td>3.109
+   </td>
+   <td>7.029
+   </td>
+  </tr>
+  <tr>
+   <td>X90804
+   </td>
+   <td>7.974
+   </td>
+   <td>17.11
+   </td>
+   <td>15.69
+   </td>
+   <td>0.466
+   </td>
+   <td>2.584
+   </td>
+   <td>41.66
+   </td>
+  </tr>
+  <tr>
+   <td>X91163
+   </td>
+   <td>1.937
+   </td>
+   <td>12.16
+   </td>
+   <td>12.05
+   </td>
+   <td>0.159
+   </td>
+   <td>7.38
+   </td>
+   <td>16.78
+   </td>
+  </tr>
+  <tr>
+   <td>X91164
+   </td>
+   <td>1.356
+   </td>
+   <td>10.6
+   </td>
+   <td>10.48
+   </td>
+   <td>0.128
+   </td>
+   <td>6.711
+   </td>
+   <td>15.23
+   </td>
+  </tr>
+  <tr>
+   <td>X91414
+   </td>
+   <td>139.1
+   </td>
+   <td>651.4
+   </td>
+   <td>637.4
+   </td>
+   <td>0.214
+   </td>
+   <td>393.8
+   </td>
+   <td>1097
+   </td>
+  </tr>
+  <tr>
+   <td>X92443
+   </td>
+   <td>2.971
+   </td>
+   <td>15.16
+   </td>
+   <td>14.94
+   </td>
+   <td>0.196
+   </td>
+   <td>8.131
+   </td>
+   <td>23.07
+   </td>
+  </tr>
+  <tr>
+   <td>X92527
+   </td>
+   <td>0.207
+   </td>
+   <td>2.415
+   </td>
+   <td>2.385
+   </td>
+   <td>0.086
+   </td>
+   <td>2.01
+   </td>
+   <td>3.26
+   </td>
+  </tr>
+  <tr>
+   <td>X92588
+   </td>
+   <td>2.365
+   </td>
+   <td>9.9
+   </td>
+   <td>9.884
+   </td>
+   <td>0.239
+   </td>
+   <td>4.198
+   </td>
+   <td>15.28
+   </td>
+  </tr>
+  <tr>
+   <td>X92904
+   </td>
+   <td>17.85
+   </td>
+   <td>34.95
+   </td>
+   <td>32.72
+   </td>
+   <td>0.511
+   </td>
+   <td>6.754
+   </td>
+   <td>106.5
+   </td>
+  </tr>
+  <tr>
+   <td>X93014
+   </td>
+   <td>5.005
+   </td>
+   <td>65.25
+   </td>
+   <td>65.8
+   </td>
+   <td>0.077
+   </td>
+   <td>53.34
+   </td>
+   <td>78.02
+   </td>
+  </tr>
+  <tr>
+   <td>X93077
+   </td>
+   <td>4.779
+   </td>
+   <td>56.94
+   </td>
+   <td>56.91
+   </td>
+   <td>0.084
+   </td>
+   <td>45.73
+   </td>
+   <td>68.76
+   </td>
+  </tr>
+  <tr>
+   <td>X93088
+   </td>
+   <td>5.865
+   </td>
+   <td>61.61
+   </td>
+   <td>62.19
+   </td>
+   <td>0.095
+   </td>
+   <td>40.47
+   </td>
+   <td>74.95
+   </td>
+  </tr>
+  <tr>
+   <td>X93347
+   </td>
+   <td>8.023
+   </td>
+   <td>77.08
+   </td>
+   <td>78.24
+   </td>
+   <td>0.104
+   </td>
+   <td>54.31
+   </td>
+   <td>97.46
+   </td>
+  </tr>
+  <tr>
+   <td>X20101.1
+   </td>
+   <td>0.64
+   </td>
+   <td>2.845
+   </td>
+   <td>2.77
+   </td>
+   <td>0.225
+   </td>
+   <td>1.57
+   </td>
+   <td>5.3
+   </td>
+  </tr>
+  <tr>
+   <td>X40401
+   </td>
+   <td>17.51
+   </td>
+   <td>77.34
+   </td>
+   <td>75.57
+   </td>
+   <td>0.226
+   </td>
+   <td>43.98
+   </td>
+   <td>133.4
+   </td>
+  </tr>
+  <tr>
+   <td>X40602
+   </td>
+   <td>5.441
+   </td>
+   <td>17.71
+   </td>
+   <td>16.68
+   </td>
+   <td>0.307
+   </td>
+   <td>9.513
+   </td>
+   <td>43.03
+   </td>
+  </tr>
+  <tr>
+   <td>X40702
+   </td>
+   <td>7.795
+   </td>
+   <td>20.66
+   </td>
+   <td>19.65
+   </td>
+   <td>0.377
+   </td>
+   <td>7.48
+   </td>
+   <td>46.4
+   </td>
+  </tr>
+  <tr>
+   <td>X41001
+   </td>
+   <td>2.156
+   </td>
+   <td>9.879
+   </td>
+   <td>9.492
+   </td>
+   <td>0.218
+   </td>
+   <td>6.054
+   </td>
+   <td>17.93
+   </td>
+  </tr>
+  <tr>
+   <td>X41101
+   </td>
+   <td>1.067
+   </td>
+   <td>11.85
+   </td>
+   <td>11.91
+   </td>
+   <td>0.09
+   </td>
+   <td>8.81
+   </td>
+   <td>14.53
+   </td>
+  </tr>
+  <tr>
+   <td>X41201
+   </td>
+   <td>42.65
+   </td>
+   <td>108.7
+   </td>
+   <td>107.6
+   </td>
+   <td>0.392
+   </td>
+   <td>11.69
+   </td>
+   <td>299.9
+   </td>
+  </tr>
+  <tr>
+   <td>X41202
+   </td>
+   <td>7.628
+   </td>
+   <td>13.82
+   </td>
+   <td>12.43
+   </td>
+   <td>0.552
+   </td>
+   <td>-1.96
+   </td>
+   <td>70.29
+   </td>
+  </tr>
+  <tr>
+   <td>X41204
+   </td>
+   <td>15.77
+   </td>
+   <td>41.61
+   </td>
+   <td>40.57
+   </td>
+   <td>0.379
+   </td>
+   <td>6.318
+   </td>
+   <td>130
+   </td>
+  </tr>
+  <tr>
+   <td>X41402
+   </td>
+   <td>43.5
+   </td>
+   <td>252.1
+   </td>
+   <td>245.2
+   </td>
+   <td>0.173
+   </td>
+   <td>157.5
+   </td>
+   <td>382.3
+   </td>
+  </tr>
+  <tr>
+   <td>X41403
+   </td>
+   <td>224.7
+   </td>
+   <td>1526
+   </td>
+   <td>1533
+   </td>
+   <td>0.147
+   </td>
+   <td>934.4
+   </td>
+   <td>2404
+   </td>
+  </tr>
+  <tr>
+   <td>X90287
+   </td>
+   <td>0.355
+   </td>
+   <td>1.154
+   </td>
+   <td>1.126
+   </td>
+   <td>0.308
+   </td>
+   <td>0.394
+   </td>
+   <td>2.488
+   </td>
+  </tr>
+  <tr>
+   <td>X90360
+   </td>
+   <td>7.403
+   </td>
+   <td>21.34
+   </td>
+   <td>21.33
+   </td>
+   <td>0.347
+   </td>
+   <td>-2.78
+   </td>
+   <td>42.41
+   </td>
+  </tr>
+  <tr>
+   <td>X90361
+   </td>
+   <td>10.27
+   </td>
+   <td>30.8
+   </td>
+   <td>30.17
+   </td>
+   <td>0.333
+   </td>
+   <td>5.325
+   </td>
+   <td>72.16
+   </td>
+  </tr>
+  <tr>
+   <td>X90641
+   </td>
+   <td>4.069
+   </td>
+   <td>20.74
+   </td>
+   <td>20.71
+   </td>
+   <td>0.196
+   </td>
+   <td>4.348
+   </td>
+   <td>34.38
+   </td>
+  </tr>
+  <tr>
+   <td>X90642
+   </td>
+   <td>5.847
+   </td>
+   <td>29.45
+   </td>
+   <td>29.36
+   </td>
+   <td>0.199
+   </td>
+   <td>11.11
+   </td>
+   <td>44.46
+   </td>
+  </tr>
+  <tr>
+   <td>X91096
+   </td>
+   <td>77.92
+   </td>
+   <td>374.7
+   </td>
+   <td>366.8
+   </td>
+   <td>0.208
+   </td>
+   <td>164.8
+   </td>
+   <td>570.4
+   </td>
+  </tr>
+  <tr>
+   <td>X91195
+   </td>
+   <td>0.03
+   </td>
+   <td>0.73
+   </td>
+   <td>0.733
+   </td>
+   <td>0.041
+   </td>
+   <td>0.634
+   </td>
+   <td>0.793
+   </td>
+  </tr>
+  <tr>
+   <td>X92196.1
+   </td>
+   <td>1.167
+   </td>
+   <td>3.826
+   </td>
+   <td>3.59
+   </td>
+   <td>0.305
+   </td>
+   <td>1.742
+   </td>
+   <td>8.053
+   </td>
+  </tr>
+  <tr>
+   <td>X92326
+   </td>
+   <td>3.284
+   </td>
+   <td>11.54
+   </td>
+   <td>11.26
+   </td>
+   <td>0.285
+   </td>
+   <td>5.345
+   </td>
+   <td>20.61
+   </td>
+  </tr>
+  <tr>
+   <td>X92327
+   </td>
+   <td>1.848
+   </td>
+   <td>5.383
+   </td>
+   <td>5.053
+   </td>
+   <td>0.343
+   </td>
+   <td>2.682
+   </td>
+   <td>14.5
+   </td>
+  </tr>
+  <tr>
+   <td>X92441
+   </td>
+   <td>7.677
+   </td>
+   <td>75.07
+   </td>
+   <td>76.51
+   </td>
+   <td>0.102
+   </td>
+   <td>52.9
+   </td>
+   <td>93.59
+   </td>
+  </tr>
+  <tr>
+   <td>X92718
+   </td>
+   <td>132.8
+   </td>
+   <td>1137
+   </td>
+   <td>1135
+   </td>
+   <td>0.117
+   </td>
+   <td>767.3
+   </td>
+   <td>1550
+   </td>
+  </tr>
+  <tr>
+   <td>X92724
+   </td>
+   <td>127.6
+   </td>
+   <td>1126
+   </td>
+   <td>1121
+   </td>
+   <td>0.113
+   </td>
+   <td>834.6
+   </td>
+   <td>1473
+   </td>
+  </tr>
+  <tr>
+   <td>X92725
+   </td>
+   <td>123.7
+   </td>
+   <td>663
+   </td>
+   <td>642.3
+   </td>
+   <td>0.187
+   </td>
+   <td>412.4
+   </td>
+   <td>973.9
+   </td>
+  </tr>
+  <tr>
+   <td>X92949
+   </td>
+   <td>7.331
+   </td>
+   <td>69.35
+   </td>
+   <td>68.75
+   </td>
+   <td>0.106
+   </td>
+   <td>52.5
+   </td>
+   <td>90.2
+   </td>
+  </tr>
+</table>
+
+
+
+<!-- Footnotes themselves at the bottom. -->
+## References
+
+[^1]:
+     Chief Medical Officer annual report 2018: better health within ... - Gov.uk. Retrieved April 18, 2019, from [https://www.gov.uk/government/publications/chief-medical-officer-annual-report-2018-better-health-within-reach](https://www.gov.uk/government/publications/chief-medical-officer-annual-report-2018-better-health-within-reach)
+
+[^2]:
+     Dahlgren G, Whitehead M. 1991. Policies and Strategies to Promote Social Equity in Health. Stockholm, Sweden: Institute for Futures Studies. 
+
+[^3]:
+     Marmot, M. (2010). Fair Society Healthy Lives full report - Parliament.uk. Retrieved April 18, 2019, from [https://www.parliament.uk/documents/fair-society-healthy-lives-full-report.pdf](https://www.parliament.uk/documents/fair-society-healthy-lives-full-report.pdf)
+
+[^4]:
+     Senior, S., (2019). Hierarchical clustering of English local authorities by sub-domains of the English Indices of Multiple Deprivation. Presented at Public Health England Scientific Conference 2019, University of Manchester.
+
+[^5]:
+     Su, Y. S., Gelman, A., Hill, J., Yajima, M., 2011. Multiple Imputation with Diagnostics (mi) in R - Columbia Statistics. Retrieved April 18, 2019, from [http://www.stat.columbia.edu/~gelman/research/published/mipaper.pdf](http://www.stat.columbia.edu/~gelman/research/published/mipaper.pdf)
+
+[^6]:
+     Institute for Health Metrics and Evaluation (IHME). GBD Compare. Seattle, WA: IHME, University of Washington, 2015. Available from http://vizhub.healthdata.org/gbd-compare.
+
+[^7]:
+     Connolly S, O’Reilly D, Rosato M., 2007. Increasing inequalities in health: is it an artefact caused by the selective movement of people? _Social Science & Medicine. _2007;64(10):2008–2015.
+
+[^8]:
+     Riva, M., Curtis, S., Gauvin, L., Fagg, J., 2009. Unravelling the extent of inequalities in health across urban and rural areas: Evidence from a national sample in England. _Social Science & Medicine, _68;4, 654-663.
+
+[^9]:
+     Doran, T., Whitehead, M., 2004. Is there a north-south divide in social class inequalities in health in Great Britain? Cross sectional study using data from the 2001 census. _BMJ_ 2004; 328 doi: [https://doi.org/10.1136/bmj.328.7447.1043](https://doi.org/10.1136/bmj.328.7447.1043)
+
+[^10]:
+     Kontonpantelis, E., Buchan, I., Webb, R. T., Ashcroft, D. M., Mamas, M. A., Doran, T., (2018). Disparities in mortality among 25–44-year-olds in England:
+    a longitudinal, population-based study. _Lancet Public Health. _3: e567-75
+
+[^11]:
+     Minton, J.W., McCartney, G., 2018. Is there a north-south mortality divide in England or is London the outlier? _Lancet Public Health, _3:12, PE556-E557 
+
+
+
+
