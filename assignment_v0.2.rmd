@@ -5,8 +5,13 @@ output: html_document
 
 ```{r, include=FALSE}
 # To be run on a Windows environment and viewed in Google Chrome
+# Candidate Number: ZVBZ7
 ```
-
+<style type="text/css">
+.table {
+    width:90% !important;
+}
+</style>
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
@@ -17,10 +22,8 @@ library(caret)
 library(dplyr)
 library(fingertipsR)
 library(geojsonio)
-library(ggcorrplot)
 library(ggplot2)
 library(htmltools)
-library(kableExtra)
 library(leaflet)
 library(mi)
 library(psycho)
@@ -60,8 +63,8 @@ z_data_imd <- pop_weighted_ave_domains %>%
   standardize() %>%
   mutate_each(funs(-.), -one_of("UTLA18CD"))
 
-# Get data
-# Seleceted indicators from a variety of fingertips profiles selected to fulfill the Marmot definitions of Social Determinants, Health Outcomes, and Risk Factors
+# Get fingertips data
+# Seleceted indicators from a variety of fingertips profiles selected to fulfil the Marmot definitions of Social Determinants, Health Outcomes, and Risk Factors
 
 early_years_indicators <- indicators(DomainID = 1938133223)
 social_determinants_df <- fingertips_data(IndicatorID = c(as.vector(early_years_indicators$IndicatorID), 93376, 22304, 10501, 90282, 91126, 91133, 92899, 90638, 93103, 93131, 93175, 91463, 90244, 90245, 92447, 91116, 92785, 91524, 91307), rank = T)
@@ -79,6 +82,7 @@ soc_dec_meta <- indicator_metadata(IndicatorID = c(IndicatorID = c(as.vector(ear
 risk_fac_meta <- indicator_metadata(IndicatorID = inds)
 health_out_meta <- indicator_metadata(IndicatorID = c(extra_indicators, 20101, 92718, 92724, 92725, 90287, 90641))
 
+# Function that takes in a data frame and outputs a list of analysed data frames
 analyze_df <- function(df){
   # Create a data frame of indicator polarities
   polarities <- df %>%
@@ -115,7 +119,7 @@ analyze_df <- function(df){
   wide_df <- wide_df %>% select(-proportna)
   
   
-  # Remove indicators with over 80% missing data - rather arbatrary number at the moment
+  # Remove indicators with over 80% missing data 
   wide_df <- wide_df[colSums(is.na(wide_df)) / dim(wide_df)[1] < 0.2]
   
   
@@ -131,25 +135,16 @@ analyze_df <- function(df){
   imputed_df <- select(imputed_df, -contains("missing")) # Remove the boolean 'missing' columns. 
   
   norm_reduced <- imputed_df
-  # Test colinearity - needs a lot of work!
+  
+  # Test colinearity - Indicators with high correlation will have 1 omitted. 
   corr <- cor(norm_reduced)
-  ggcorrplot(corr, hc.order = TRUE, type = "lower",
-             outline.col = "white",
-             ggtheme = ggplot2::theme_gray,
-             colors = c("#6D9EC1", "white", "#E46726"),
-             insig = "blank")
+
   hc <- caret::findCorrelation(corr)
   hc <- sort(hc)
   if (length(hc) == 0){
     reduced_data <- norm_reduced
   } else {
     reduced_data <- norm_reduced[, -c(hc)]
-    corr_reduced <- cor(reduced_data)
-    ggcorrplot(corr_reduced, hc.order = TRUE, type = "lower",
-               outline.col = "white",
-               ggtheme = ggplot2::theme_gray,
-               colors = c("#6D9EC1", "white", "#E46726"),
-               insig = "blank")
   }
 
 
@@ -162,6 +157,7 @@ analyze_df <- function(df){
     }
   }
 
+  # Create summary stats to use as the baseline measure for future years
   create_summary_stats <- function(x){
     summary_stats <- sapply(x, function(x) c( "Stand dev" = sd(x), 
                          "Mean"= mean(x,na.rm=TRUE),
@@ -205,6 +201,7 @@ analyze_df <- function(df){
   return(list('data' = z_data, 'metadata' = metadata_to_return, 'summary' = summary_to_return, 'imp_img' = imp_img))
 }
 
+# Pass component data frames to analyze_df and unpack results
 health_outcomes_returned <- analyze_df(health_outcomes_df)
 health_outcomes_processed <- health_outcomes_returned$data
 health_outcomes_metadata <- health_outcomes_returned$metadata
@@ -226,6 +223,7 @@ soc_det_imp_img <- soc_det_returned$imp_img
 soc_det_processed <- merge(soc_det_processed, z_data_imd, by.x = 'AreaCode', by.y = 'UTLA18CD')
 soc_det_processed$mean <- apply(soc_det_processed[, !(names(soc_det_processed) %in% c('mean', 'AreaCode'))], 1, mean)
 
+# Create a dta frame of z_means from all the components
 z_means <- data.frame(health_outcomes_processed$mean, soc_det_processed$mean, risk_factors_processed$mean, risk_factors_processed$AreaCode)
 names(z_means) <- c("health_outcomes", "social_determinants", "risk_factors", "AreaCode")
 z_means$grand_mean <- apply(z_means[, !(names(z_means) %in% c('AreaCode'))], 1, mean)
@@ -234,16 +232,20 @@ z_means$social_determinants.rank <- rank(z_means$social_determinants, na.last = 
 z_means$risk_factors.rank <- rank(z_means$risk_factors, na.last = FALSE)
 z_means$overall.rank <- rank(z_means$grand_mean, na.last = FALSE)
 
+# Get shape files for UTLAs
 utlas <- geojson_read("https://opendata.arcgis.com/datasets/d3d7b7538c934cf29db791a705631e24_0.geojson", what = 'sp')
-# utlas <- geojson_read("Counties_and_Unitary_Authorities_December_2017_Full_Clipped_Boundaries_in_England_and_Wales.geojson", what = 'sp')
 # drop Wales
 utlas <- utlas[grep('E', utlas$ctyua17cd), ]
+# Reduce the size of the file
 utlas <- ms_simplify(utlas)
+# Add z_means to the geojson
 utlas@data <- left_join(utlas@data, z_means, by = c("ctyua17cd" = "AreaCode"))
+# Set colour pallets for each of the components
 pal_grand <- colorNumeric(palette = "Spectral", domain = utlas$grand_mean)
 pal_soc <- colorNumeric(palette = "Spectral", domain = utlas$social_determinants)
 pal_risk <- colorNumeric(palette = "Spectral", domain = utlas$risk_factors)
 pal_outcomes <- colorNumeric(palette = "Spectral", domain = utlas$health_outcomes)
+# Define labels for the map views 
 labs_grand_mean <- lapply(seq(nrow(utlas@data)), function(i) {
   paste0( '<p>', utlas@data[i, "ctyua17nm"], '<p></p>', 
           'Health Index Score:', round(utlas@data[i, 'grand_mean'], 3),'</p><p>', 
@@ -264,6 +266,8 @@ labs_outcomes <- lapply(seq(nrow(utlas@data)), function(i) {
           'Health Outcomes Score:', round(utlas@data[i, 'health_outcomes'], 3),'</p><p>', 
           'Rank:', utlas@data[i, 'health_outcomes.rank'], '</p>' ) 
 })
+
+# Create map
 map1 <- leaflet(utlas) %>%
   # Base groups
   addTiles(group = "OSM (default)") %>%
@@ -286,15 +290,18 @@ map1 <- leaflet(utlas) %>%
     overlayGroups = c("OSM (default)"),
     options = layersControlOptions(collapsed = FALSE)) %>%
   addLegend("bottomright", pal = pal_grand, values = utlas$grand_mean, title = "Mean Z Scores for Index", opacity = 1)
-
+# Download HALE data from GBD
 temp <- tempfile()
 download.file("http://s3.healthdata.org/gbd-api-2017-public/e9890501faf9f59e13ea28802f789ac0_files/IHME-GBD_2017_DATA-e9890501-1.zip", temp)
 gbd_data <- read_csv(unz(temp, "IHME-GBD_2017_DATA-e9890501-1.csv"))
 unlink(temp)
+# Apply rank to HALE data
 gbd_data$gbd_rank <- rank(gbd_data$val)
 gbd_data$location[gbd_data$location == "St Helens"] <- "St. Helens"
+# Create comparision data frame between GBD and CHI and test similaritiy using Spearman's Rho
 comparision <- left_join(utlas@data, gbd_data, by = c("ctyua17nm" = "location"))
 cor_test <- cor.test(~ overall.rank + gbd_rank, data = comparision, method = "spearman", continuity = F, conf.level = 0.95)
+# Create a summary stats data frame with all the components
 summary_stats <- cbind(as.data.frame(soc_det_summary), as.data.frame(risk_factors_summary), as.data.frame(health_outcomes_summary))
 names(summary_stats) <- substring(names(summary_stats), 2)
 
@@ -332,11 +339,6 @@ The CHI is based on academic theory as to the core components of health across t
 
 Table 1: Component parts of the determinants of health
 
-<style type="text/css">
-.table {
-    width:80% !important;
-}
-</style>
 |  Social Determinants  | Risk Factors | Health Outcomes |
 | --- | --- | --- |
 |  Early years | Alcohol | Loss of years of life |
@@ -361,11 +363,7 @@ Fingertips data were filtered to retrieve the most recent data points for each i
 
 Missing data from the remaining indicators were imputed using multiple imputation. Data are fit to 4 Bayesian generalized linear models over 30 iterations, and missing values predicted using these models, with the best fit being selected for imputation[^5]. Heatmaps of the spread of the data before and after imputation are shown in Figure 1. 
 
-Normality of distribution within each of the indicators was assumed using the Central Limit Theorem (CLT). As the samples sizes for each of the indicators was very large, CLT suggests that for an indicator
-
-[insert equation here]
-
-Indicators were tested for covariance and indicators using a pairwise correlation matrix with those indicators with an [] selected for removal, with the most globally correlated indicator being removed (Table 2).
+Normality of distribution within each of the indicators was assumed using the Central Limit Theorem. Indicators were tested for covariance and indicators using a pairwise correlation matrix with those indicators with an [] selected for removal, with the most globally correlated indicator being removed (Table 2).
 
 Z-scores were calculated for all indicators, and mean z-scores and ranks calculated for components, polarity switched where necessary. These were then aggregated into the CHI giving equal weighting to each of the components. Summary statistics for each indicator were output as a baseline measure for future years. 
 
@@ -387,12 +385,7 @@ Table 2: Indicators from each component removed for covariance reasons
 
 ## Results
 
-A CHI based on publicly available, national, long-term data was created based on three components; social determinants of health, individual risk factors, and health outcomes. 
-```{r chi_df, echo=F}
-kable(z_means[, order(names(z_means))]) %>% kable_styling(fixed_thead = T, bootstrap_options = c("striped", "hover", "condensed", "responsive"))
-```
-
-The contribution of individual indicators to each component was calculated, and each component was given equal weighing in the construction of the CHI. This index was mapped to UTLAs to give an overall view of the distribution of health across England (Figure 2).
+A CHI based on publicly available, national, long-term data was created based on three components; social determinants of health, individual risk factors, and health outcomes (Appendix 3). The contribution of individual indicators to each component was calculated, and each component was given equal weighing in the construction of the CHI. This index was mapped to UTLAs to give an overall view of the distribution of health across England (Figure 2).
 
 ```{r map, echo=FALSE, out.width = '100%'}
 map1
@@ -400,7 +393,7 @@ map1
 
 Figure 2: The CHI total mapped to UTLAs in England. Lower Mean Z Scores indicator lower health in that geographical area.
 
-There were a total of 79 Fingertips indicators and 16 IMD subdomains included after exclusions for missing data and collinearity (Appendix 2).  It is possible to disaggregate the CHI into each component (Figure 3). It is also possible to analyse the contribution of each indicator to the index. The plotted outputs are designed to highlight the areas with greatest need.
+There were a total of 79 Fingertips indicators and 16 IMD subdomains included after exclusions for missing data and collinearity (Appendix 2).  It is possible to disaggregate the CHI into each component . It is also possible to analyse the contribution of each indicator to the index. The plotted outputs are designed to highlight the areas with greatest need.
 
 Rankings were also produced for the CHI and its components, primarily as a tool to validate the index against other indices that use differing methodologies. Outputs of the top 5 ranked areas (most need) are shown in Table 3.
 
@@ -433,7 +426,9 @@ A CHI was created to quantify, and track changes to, health across England. The 
 
 CHI highlights previously described health inequality divides and strongly correlates with alternative measures. This suggests that CHI is a robust measure of health across England that can be used as a baseline measure for future reference and evaluation. Each indicator is given an equal weighting within the construct of each component, and each component has an equal weighting in CHI. There might an increase in accuracy with a more sophisticated weighting mechanism in future. There is also a risk of changes to the methods used in creating the indicators used in CHI, and this would have to be accounted for in future years. Effort should be made to replicate CHI at clinical geographies, such as Clinical Commissioning Groups, to allow more targeted policy action.  
 
-INSERT STAKEHOLDER ANALYSIS HERE
+![Figure 5: Stakeholder analysis assessing key stakeholders from public interest, national & international organisations, and local area commissioning bodies. Plot is of hypothetical power/interest plane with current positions plotted and aims of CHI marketing strategy denoted as arrows.
+](https://i.imgur.com/SQe2nvd.png)
+A brief stakeholder analysis was undertaken to assess the current power and interest of selected stakeholders (Figure 5)[^12]. The CHI is intended to give evidential support for interventions for those with position power to use, such as the CMO and public health organisations. Local commissioning will use CHI to target resources to reduce health inequalities. There is the potential for media attention to develop a negative narrative around geographical variations (eg, “postcode lottery”). The intention would be to combat negative power using expert power from CMO and central government to control the media narrative.  
 
 
 ## Appendices
@@ -503,7 +498,7 @@ Appendix 1: Fingertips indicators selected to be included in analysis from Finge
 |   |  | Rate of deaths from Respiratory Disease among people aged 65 years and over |
 
 
-Appendix 2: Final indicators included in the CHI from Fingertips and IMD in the components to which they contributed. . 
+Appendix 2: Final indicators included in the CHI from Fingertips and IMD in the components to which they contributed. 
 
 
 |  Social Determinants | Risk Factors | Health Outcomes |
@@ -797,6 +792,7 @@ Appendix 4: Baseline measurements of component parts of CHI for future evaluatio
 |  X92949 | 7.331 | 69.35 | 68.75 | 0.106 | 52.5 | 90.2 |
 
 <!-- Footnotes themselves at the bottom. -->
+
 ## References
 
 [^1]:
@@ -833,6 +829,7 @@ Appendix 4: Baseline measurements of component parts of CHI for future evaluatio
 [^11]:
      Minton, J.W., McCartney, G., 2018. Is there a north-south mortality divide in England or is London the outlier? _Lancet Public Health, _3:12, PE556-E557 
 
-
+[^12]:
+    Buse, K., Mays, N, Walt G., (2012). Making Health Policy. McGraw-Hill Education (UK).
 
 
