@@ -27,6 +27,7 @@ library(htmltools)
 library(leaflet)
 library(mi)
 library(psycho)
+library(RCurl)
 library(readr)
 library(rmapshaper)
 library(tibble)
@@ -290,11 +291,11 @@ map1 <- leaflet(utlas) %>%
     overlayGroups = c("OSM (default)"),
     options = layersControlOptions(collapsed = FALSE)) %>%
   addLegend("bottomright", pal = pal_grand, values = utlas$grand_mean, title = "Mean Z Scores for Index", opacity = 1)
+
 # Download HALE data from GBD
-temp <- tempfile()
-download.file("http://s3.healthdata.org/gbd-api-2017-public/e9890501faf9f59e13ea28802f789ac0_files/IHME-GBD_2017_DATA-e9890501-1.zip", temp)
-gbd_data <- read_csv(unz(temp, "IHME-GBD_2017_DATA-e9890501-1.csv"))
-unlink(temp)
+gbd_raw <- getURL("https://raw.githubusercontent.com/RustyBrain/phds_assignment/master/IHME-GBD_2017_DATA-e9890501-1.csv")
+gbd_data <- read.csv(text = gbd_raw)
+
 # Apply rank to HALE data
 gbd_data$gbd_rank <- rank(gbd_data$val)
 gbd_data$location[gbd_data$location == "St Helens"] <- "St. Helens"
